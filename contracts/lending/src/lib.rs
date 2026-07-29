@@ -629,7 +629,9 @@ impl LendingContract {
             platform_fee,
             collateral_asset,
             collateral_amount,
-            rate_model,
+            // New loans always start on the fixed model; borrowers opt into
+            // floating rates afterwards via `switch_rate_model`.
+            rate_model: InterestRateModel::Fixed,
             base_rate_bps: interest_rate_bps,
             last_rate_update: now,
         };
@@ -643,7 +645,7 @@ impl LendingContract {
         env.storage().instance().set(&DataKey::UncollectedFees, &(current_fees + platform_fee));
 
         // Track per-borrower list
-        Self::store_borrower_loan_id(&env, &borrower, loan_id);
+        Self::push_loan_id_for_borrower(&env, &borrower, loan_id);
 
         env.events().publish(
             (symbol_short!("loan"), symbol_short!("request")),
@@ -1041,25 +1043,21 @@ impl LendingContract {
     }
 
     fn push_loan_id_for_borrower(env: &Env, borrower: &Address, loan_id: u32) {
-        let key = DataKey::BorrowerLoans(borrower.clone());
-        let mut ids: Vec<u32> = env
-            .storage()
+        let count_key = DataKey::BorrowerLoanCount(borrower.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage()
             .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(env));
-        ids.push_back(loan_id);
-        env.storage().persistent().set(&key, &ids);
+            .set(&DataKey::BorrowerLoanAt(borrower.clone(), count), &loan_id);
+        env.storage().persistent().set(&count_key, &(count + 1));
     }
 
     fn push_loan_id_for_lender(env: &Env, lender: &Address, loan_id: u32) {
-        let key = DataKey::LenderLoans(lender.clone());
-        let mut ids: Vec<u32> = env
-            .storage()
+        let count_key = DataKey::LenderLoanCount(lender.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage()
             .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(env));
-        ids.push_back(loan_id);
-        env.storage().persistent().set(&key, &ids);
+            .set(&DataKey::LenderLoanAt(lender.clone(), count), &loan_id);
+        env.storage().persistent().set(&count_key, &(count + 1));
     }
 
     fn assert_admin(env: &Env, caller: &Address) {

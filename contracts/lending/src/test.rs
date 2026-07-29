@@ -563,13 +563,14 @@ fn test_create_loan_request_blocked_when_paused() {
 
     client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &1500,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Fixed,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1500,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
 }
 
@@ -583,13 +584,14 @@ fn test_approve_loan_blocked_when_paused() {
     // Create a loan while unpaused
     let loan_id = client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &1500,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Fixed,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1500,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
 
     // Pause
@@ -611,13 +613,14 @@ fn test_mark_defaulted_blocked_when_paused() {
     let lender = Address::generate(&env);
     let loan_id = client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &1500,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Fixed,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1500,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
     client.approve_loan(&lender, &loan_id, &1);
     client.activate_loan(&admin, &loan_id);
@@ -639,13 +642,14 @@ fn test_record_payment_allowed_when_paused() {
     let lender = Address::generate(&env);
     let loan_id = client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &1500,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Fixed,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1500,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
     client.approve_loan(&lender, &loan_id, &1);
     client.activate_loan(&admin, &loan_id);
@@ -749,13 +753,14 @@ fn test_resume_operations_after_unpause() {
     // Create a loan again — should work
     let loan_id = client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &1500,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Fixed,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1500,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
     assert_eq!(loan_id, 1);
 }
@@ -810,19 +815,26 @@ fn create_and_activate_loan(
 
     let loan_id = client.create_loan_request(
         borrower,
-        &principal,
-        &days,
-        &rate_bps,
-        &max_loan,
-        collateral_asset,
-        &100_000_0000000,
-        rate_model,
+        &LoanRequestInput {
+            amount: principal,
+            duration_days: days,
+            interest_rate_bps: rate_bps,
+            max_loan_amount: max_loan,
+            collateral_asset: collateral_asset.clone(),
+            collateral_amount: 100_000_0000000,
+        },
     );
 
     // Approve (lender = admin for simplicity)
     client.approve_loan(admin, &loan_id, &1);
     // Activate
     client.activate_loan(admin, &loan_id);
+
+    // New loans always start on the Fixed model (see `create_loan_request`);
+    // switch once more here if the caller wants to start on Floating instead.
+    if *rate_model == InterestRateModel::Floating {
+        client.switch_rate_model(borrower, &loan_id);
+    }
     loan_id
 }
 
@@ -834,35 +846,43 @@ fn test_create_loan_with_fixed_rate_model() {
 
     let loan_id = client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &1000,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Fixed,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1000,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.rate_model, InterestRateModel::Fixed);
     assert_eq!(loan.base_rate_bps, 1000);
 }
 
-/// Creating a Floating-rate loan stores the model correctly.
+/// Creating a loan then switching once reaches the Floating model, and the
+/// original request rate is preserved as `base_rate_bps`.
 #[test]
 fn test_create_loan_with_floating_rate_model() {
-    let (env, contract_id, _admin, borrower, collateral_asset) = setup();
+    let (env, contract_id, admin, borrower, collateral_asset) = setup();
     let client = LendingContractClient::new(&env, &contract_id);
 
     let loan_id = client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &500,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Floating,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 500,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
+    // New loans always start Fixed; switching requires an ACTIVE loan.
+    client.approve_loan(&admin, &loan_id, &1);
+    client.activate_loan(&admin, &loan_id);
+    client.switch_rate_model(&borrower, &loan_id);
+
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.rate_model, InterestRateModel::Floating);
     assert_eq!(loan.base_rate_bps, 500);
@@ -987,13 +1007,14 @@ fn test_switch_rate_model_only_active() {
     // Create but don't activate
     let loan_id = client.create_loan_request(
         &borrower,
-        &1_000_0000000,
-        &30,
-        &1000,
-        &100_000_0000000,
-        &collateral_asset,
-        &100_000_0000000,
-        &InterestRateModel::Fixed,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1000,
+            max_loan_amount: 100_000_0000000,
+            collateral_asset,
+            collateral_amount: 100_000_0000000,
+        },
     );
     client.switch_rate_model(&borrower, &loan_id);
 }

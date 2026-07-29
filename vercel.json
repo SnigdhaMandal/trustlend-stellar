@@ -7,6 +7,10 @@
     {
       "path": "/api/cron/default-management",
       "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/cron/webhook-listener",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

@@ -153,13 +153,14 @@ fn test_collect_protocol_fees_from_lending() {
     // Create loan request (accrues platform fee)
     let _loan_id = lending.create_loan_request(
         &borrower,
-        &1_000_0000000i128,
-        &30u32,
-        &1000u32,
-        &100_000_0000000i128,
-        &collateral_asset,
-        &100_000_0000000i128,
-        &lending::InterestRateModel::Fixed,
+        &lending::LoanRequestInput {
+            amount: 1_000_0000000i128,
+            duration_days: 30u32,
+            interest_rate_bps: 1000u32,
+            max_loan_amount: 100_000_0000000i128,
+            collateral_asset,
+            collateral_amount: 100_000_0000000i128,
+        },
     );
 
     let uncollected = lending.get_uncollected_fees();

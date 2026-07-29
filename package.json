@@ -10,6 +10,7 @@
     "e2e:seed": "node scripts/e2e-seed-and-run.mjs",
     "oracle:post": "node scripts/oracle-post-credit-score.mjs",
     "liquidation:keeper": "tsx scripts/liquidation-keeper.ts",
+    "webhooks:listen": "tsx scripts/webhook-listener.ts",
     "prepare": "husky",
     "commitlint": "commitlint --edit"
   },
