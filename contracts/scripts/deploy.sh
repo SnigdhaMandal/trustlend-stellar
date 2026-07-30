@@ -114,6 +114,14 @@ TLEND_AIRDROP_ID=$(stellar contract deploy \
   --source "$ADMIN_KEY")
 echo "  ✔ TLEND_AIRDROP_CONTRACT_ID = $TLEND_AIRDROP_ID"
 
+echo ""
+echo "▶ Deploying TlendStakingContract…"
+TLEND_STAKING_ID=$(stellar contract deploy \
+  --wasm target/wasm32v1-none/release/tlend_staking.wasm \
+  --network "$NETWORK" \
+  --source "$ADMIN_KEY")
+echo "  ✔ TLEND_STAKING_CONTRACT_ID = $TLEND_STAKING_ID"
+
 # ── Step 3: Initialise contracts ──────────────────────────────────────────────
 
 echo ""
@@ -271,6 +279,23 @@ else
   echo "      --admin $ADMIN_ADDRESS --token $TLEND_TOKEN_ID --merkle_root <root>"
 fi
 
+# ── TLEND staking / yield farming (issue #112) ───────────────────────────────
+# The stake token is generic — any SEP-41 token address works (a real LP/vault
+# share token, or TLEND itself for single-asset staking). Defaults to staking
+# TLEND to earn more TLEND as a day-one bootstrap pool; point STAKING_LP_TOKEN_ID
+# at a real LP token once one exists.
+#   export STAKING_LP_TOKEN_ID=<lp-token-contract-id>
+#   export STAKING_REWARDS_DURATION_SECS=604800   # default 7 days
+STAKING_LP_TOKEN_ID="${STAKING_LP_TOKEN_ID:-$TLEND_TOKEN_ID}"
+STAKING_REWARDS_DURATION_SECS="${STAKING_REWARDS_DURATION_SECS:-604800}"
+
+echo "▶ Initialising TlendStakingContract (stake=$STAKING_LP_TOKEN_ID, reward=$TLEND_TOKEN_ID)…"
+stellar contract invoke --id "$TLEND_STAKING_ID" --source "$ADMIN_KEY" --network "$NETWORK" \
+  -- initialize --admin "$ADMIN_ADDRESS" --stake_token "$STAKING_LP_TOKEN_ID" \
+  --reward_token "$TLEND_TOKEN_ID" --rewards_duration_secs "$STAKING_REWARDS_DURATION_SECS"
+echo "  ℹ Fund a reward period later with \`notify_reward_amount\` (admin, reward_amount) —"
+echo "    it pulls reward_amount of TLEND from the admin and spreads it over the duration."
+
 echo ""
 echo "✔ All contracts initialised"
 
@@ -327,6 +352,11 @@ stellar contract bindings typescript \
   --id "$TLEND_AIRDROP_ID" \
   --output-dir "$BINDINGS_OUT/tlend_airdrop"
 
+stellar contract bindings typescript \
+  --network "$NETWORK" \
+  --id "$TLEND_STAKING_ID" \
+  --output-dir "$BINDINGS_OUT/tlend_staking"
+
 echo "  ✔ Bindings written to lib/contracts/generated/"
 
 # ── Step 5: Write .env.local snippet ─────────────────────────────────────────
@@ -343,6 +373,7 @@ NEXT_PUBLIC_MULTISIG_ADMIN_CONTRACT_ID=$MULTISIG_ID
 NEXT_PUBLIC_TLEND_TOKEN_CONTRACT_ID=$TLEND_TOKEN_ID
 NEXT_PUBLIC_TLEND_VESTING_CONTRACT_ID=$TLEND_VESTING_ID
 NEXT_PUBLIC_TLEND_AIRDROP_CONTRACT_ID=$TLEND_AIRDROP_ID
+NEXT_PUBLIC_TLEND_STAKING_CONTRACT_ID=$TLEND_STAKING_ID
 NEXT_PUBLIC_ADMIN_ADDRESS=$ADMIN_ADDRESS
 NEXT_PUBLIC_ORACLE_ADDRESS=${ORACLE_ADDRESS:-}
 EOF
@@ -364,4 +395,5 @@ echo "    Multisig    : $MULTISIG_ID"
 echo "    TLEND Token : $TLEND_TOKEN_ID"
 echo "    TLEND Vest. : $TLEND_VESTING_ID"
 echo "    TLEND Aird. : $TLEND_AIRDROP_ID"
+echo "    TLEND Stake : $TLEND_STAKING_ID"
 echo "═══════════════════════════════════════════════════"

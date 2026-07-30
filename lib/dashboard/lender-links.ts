@@ -4,6 +4,7 @@ export const lenderNavLinks = [
   { href: "/dashboard/lender/marketplace", label: "Loan Marketplace" },
   { href: "/dashboard/lender/history",     label: "Transaction History" },
   { href: "/dashboard/lender/pools",       label: "Pool Investment" },
+  { href: "/dashboard/lender/staking",     label: "Staking" },
   { href: "/dashboard/lender/portfolio",   label: "Portfolio" },
   { href: "/dashboard/lender/risk",        label: "Risk" },
   { href: "/dashboard/treasury",           label: "Treasury Strategy" },

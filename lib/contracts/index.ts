@@ -10,6 +10,7 @@ export * as LendingContract from "./lending";
 export * as DefaultContract from "./default";
 export * as GovernanceContract from "./governance";
 export * as MultiSigAdminContract from "./multisig-admin";
+export * as StakingContract from "./staking";
 
 export { SOROBAN_RPC_URL, NETWORK_PASSPHRASE } from "@/lib/stellar/soroban";
 

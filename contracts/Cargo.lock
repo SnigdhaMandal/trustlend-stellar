@@ -1635,6 +1635,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlend_staking"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "tlend_token",
+]
+
+[[package]]
 name = "tlend_token"
 version = "0.1.0"
 dependencies = [
