@@ -12,7 +12,7 @@ import {
   i128ToScVal,
   bytesToScVal,
 } from "@/lib/stellar/soroban";
-import type { LoanRecord, LoanStatus, PaymentRecord, InterestRateModel } from "@/types/contracts";
+import type { LoanRecord, LoanStatus, PaymentRecord, InterestRateModel, CollateralEntry } from "@/types/contracts";
 
 const CONTRACT_ID = process.env.NEXT_PUBLIC_LENDING_CONTRACT_ID!;
 
@@ -24,6 +24,175 @@ if (!CONTRACT_ID) {
 }
 
 // ─── Read functions ───────────────────────────────────────────────────────────
+
+
+// ─── Multi-asset collateral vault functions ────────────────────────────────
+
+/**
+ * Deposit collateral to the borrower's vault position.
+ */
+export async function depositCollateral(
+  borrowerAddress: string,
+  assetAddress: string,
+  amountStroops: bigint,
+) {
+  return callContract({
+    contractId: CONTRACT_ID,
+    method: "deposit_collateral",
+    args: [
+      addressToScVal(borrowerAddress),
+      addressToScVal(assetAddress),
+      i128ToScVal(amountStroops),
+    ],
+    callerAddress: borrowerAddress,
+  });
+}
+
+/**
+ * Withdraw collateral from the borrower's vault position.
+ */
+export async function withdrawCollateral(
+  borrowerAddress: string,
+  assetAddress: string,
+  amountStroops: bigint,
+) {
+  return callContract({
+    contractId: CONTRACT_ID,
+    method: "withdraw_collateral",
+    args: [
+      addressToScVal(borrowerAddress),
+      addressToScVal(assetAddress),
+      i128ToScVal(amountStroops),
+    ],
+    callerAddress: borrowerAddress,
+  });
+}
+
+/**
+ * Get all collateral entries for a borrower.
+ */
+export async function getUserCollateralEntries(
+  borrowerAddress: string,
+  callerAddress: string,
+): Promise<{ asset: string; amount: bigint }[]> {
+  const raw = await simulateContractCall({
+    contractId: CONTRACT_ID,
+    method: "get_user_collateral_entries",
+    args: [addressToScVal(borrowerAddress)],
+    callerAddress,
+  });
+  return (raw as { asset: string; amount: string }[]).map((e) => ({
+    asset: e.asset,
+    amount: BigInt(e.amount),
+  }));
+}
+
+/**
+ * Get the total borrowing power for a borrower in base asset units.
+ */
+export async function getBorrowingPower(
+  borrowerAddress: string,
+  callerAddress: string,
+): Promise<bigint> {
+  const result = await simulateContractCall({
+    contractId: CONTRACT_ID,
+    method: "get_borrowing_power",
+    args: [addressToScVal(borrowerAddress)],
+    callerAddress,
+  });
+  return BigInt(result as string | number);
+}
+
+/**
+ * Get the total collateral value (not LTV-adjusted) for a borrower.
+ */
+export async function getTotalCollateralValue(
+  borrowerAddress: string,
+  callerAddress: string,
+): Promise<bigint> {
+  const result = await simulateContractCall({
+    contractId: CONTRACT_ID,
+    method: "get_total_collateral_value",
+    args: [addressToScVal(borrowerAddress)],
+    callerAddress,
+  });
+  return BigInt(result as string | number);
+}
+
+/**
+ * Configure collateral parameters for an asset (multisig admin only).
+ */
+export async function setAssetCollateralConfig(
+  adminAddress: string,
+  assetAddress: string,
+  config: { collateralFactorBps: number; hasPriceOracle: boolean; volatilityBps: number },
+) {
+  return callContract({
+    contractId: CONTRACT_ID,
+    method: "set_asset_collateral_config",
+    args: [
+      addressToScVal(adminAddress),
+      addressToScVal(assetAddress),
+      {
+        collateral_factor_bps: u32ToScVal(config.collateralFactorBps),
+        has_price_oracle: config.hasPriceOracle,
+        volatility_bps: u32ToScVal(config.volatilityBps),
+      },
+    ],
+    callerAddress: adminAddress,
+  });
+}
+
+/**
+ * Get the collateral configuration for an asset.
+ */
+export async function getAssetCollateralConfig(
+  assetAddress: string,
+  callerAddress: string,
+): Promise<{ collateralFactorBps: number; hasPriceOracle: boolean; volatilityBps: number }> {
+  const raw = await simulateContractCall({
+    contractId: CONTRACT_ID,
+    method: "get_asset_collateral_config",
+    args: [addressToScVal(assetAddress)],
+    callerAddress,
+  });
+  const r = raw as Record<string, unknown>;
+  return {
+    collateralFactorBps: Number(r.collateral_factor_bps ?? 7500),
+    hasPriceOracle: Boolean(r.has_price_oracle ?? false),
+    volatilityBps: Number(r.volatility_bps ?? 0),
+  };
+}
+
+/**
+ * Set the authorized price oracle address (multisig admin only).
+ */
+export async function setPriceOracle(
+  adminAddress: string,
+  oracleAddress: string,
+) {
+  return callContract({
+    contractId: CONTRACT_ID,
+    method: "set_price_oracle",
+    args: [addressToScVal(adminAddress), addressToScVal(oracleAddress)],
+    callerAddress: adminAddress,
+  });
+}
+
+/**
+ * Get the authorized price oracle address.
+ */
+export async function getPriceOracle(
+  callerAddress: string,
+): Promise<string> {
+  const result = await simulateContractCall({
+    contractId: CONTRACT_ID,
+    method: "get_price_oracle",
+    args: [],
+    callerAddress,
+  });
+  return result as string;
+}
 
 export async function getLoan(
   loanId: number,
@@ -225,24 +394,29 @@ export async function createLoanRequest(
   durationDays: number,
   interestRateBps: number,
   maxLoanAmountStroops: bigint,
-  collateralAssetAddress: string,
-  collateralAmount: bigint,
+  collateralEntries: { asset: string; amount: bigint }[],
   rateModel: InterestRateModel = "Fixed",
 ): Promise<number> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rateModelScVal = { type: "symbol", value: rateModel } as any;
+  // Build the LoanRequestInput struct
+  const collateralEntriesScVal = collateralEntries.map((e) => ({
+    asset: addressToScVal(e.asset),
+    amount: i128ToScVal(e.amount),
+  }));
+  const rateModelScVal = { type: "symbol", value: rateModel };
+  const requestInput = {
+    amount: i128ToScVal(amountStroops),
+    duration_days: u32ToScVal(durationDays),
+    interest_rate_bps: u32ToScVal(interestRateBps),
+    max_loan_amount: i128ToScVal(maxLoanAmountStroops),
+    collateral_entries: collateralEntriesScVal,
+    rate_model: rateModelScVal,
+  };
   const result = await callContract({
     contractId: CONTRACT_ID,
     method: "create_loan_request",
     args: [
       addressToScVal(borrowerAddress),
-      i128ToScVal(amountStroops),
-      u32ToScVal(durationDays),
-      u32ToScVal(interestRateBps),
-      i128ToScVal(maxLoanAmountStroops),
-      addressToScVal(collateralAssetAddress),
-      i128ToScVal(collateralAmount),
-      rateModelScVal,
+      requestInput,
     ],
     callerAddress: borrowerAddress,
   });
@@ -422,8 +596,6 @@ function decodeLoan(raw: unknown): LoanRecord {
     status: extractEnumVariant(r.status) as LoanStatus,
     escrowId: Number(r.escrow_id),
     platformFee: BigInt(r.platform_fee as string | number),
-    collateralAsset: r.collateral_asset as string,
-    collateralAmount: BigInt(r.collateral_amount as string | number),
     rateModel: (extractEnumVariant(r.rate_model) as InterestRateModel) ?? "Fixed",
     baseRateBps: Number(r.base_rate_bps ?? r.interest_rate_bps),
     lastRateUpdate: BigInt((r.last_rate_update ?? r.created_at ?? 0) as string | number),

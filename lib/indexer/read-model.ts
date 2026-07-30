@@ -44,13 +44,36 @@ export interface IndexedDashboardReadModel {
   escrowEvents: IndexedEscrowEvent[];
 }
 
-interface ReadOptions {
+/**
+ * Pagination options for indexer queries.
+ *
+ * Both `first` and `offset` are standard SubQuery GraphQL pagination params.
+ * `after` enables cursor-based pagination (takes precedence over `offset`).
+ *
+ * Examples:
+ *   // First page, 20 items
+ *   { limit: 20 }
+ *   // Second page via offset
+ *   { limit: 20, offset: 20 }
+ *   // Next page via cursor
+ *   { limit: 20, after: "YXJyYXljb25uZWN0aW9uOjI=" }
+ */
+export interface PaginationOptions {
+  /** Maximum records to return (default: 50). */
+  limit?: number;
+  /** Zero-based offset for skip-based pagination. */
+  offset?: number;
+  /** Cursor string for cursor-based pagination (overrides offset). */
+  after?: string | null;
+}
+
+interface ReadOptions extends PaginationOptions {
   userId?: string | null;
   walletAddress?: string | null;
-  limit?: number;
 }
 
 const DEFAULT_LIMIT = 50;
+const DEFAULT_OFFSET = 0;
 
 function getMode(): IndexerMode {
   const raw = (process.env.TRUSTLEND_INDEXER_READ_MODE ?? "fallback").toLowerCase();
@@ -134,6 +157,28 @@ async function requestRest<T>(
 
   const json = await res.json();
   return Array.isArray(json) ? (json as T[]) : unwrapRows<T>(json, preferredKey);
+}
+
+/**
+ * Build pagination variables for GraphQL queries.
+ */
+export function buildPaginationVariables(pagination?: PaginationOptions): Record<string, unknown> {
+  return {
+    limit: pagination?.limit ?? DEFAULT_LIMIT,
+    offset: pagination?.offset ?? DEFAULT_OFFSET,
+    after: pagination?.after ?? null,
+  };
+}
+
+/**
+ * Build pagination params for REST API calls.
+ */
+export function buildRestPaginationParams(pagination?: PaginationOptions): Record<string, number | string | undefined | null> {
+  return {
+    limit: pagination?.limit ?? DEFAULT_LIMIT,
+    offset: pagination?.offset ?? DEFAULT_OFFSET,
+    after: pagination?.after ?? null,
+  };
 }
 
 async function readIndexed<T>({
@@ -221,10 +266,19 @@ function normalizeEscrowEvent(row: Record<string, unknown>): IndexedEscrowEvent 
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GraphQL Queries (now with offset + cursor-based pagination)
+// ─────────────────────────────────────────────────────────────────────────────
+
 const BORROWER_LOANS_QUERY = `
-  query TrustLendBorrowerLoans($userId: String, $walletAddress: String, $limit: Int!) {
+  query TrustLendBorrowerLoans(
+    $userId: String, $walletAddress: String,
+    $limit: Int!, $offset: Int, $after: String
+  ) {
     loans(
       first: $limit
+      offset: $offset
+      after: $after
       orderBy: createdAt
       orderDirection: desc
       where: { borrowerId: $userId, borrowerAddress: $walletAddress }
@@ -236,9 +290,14 @@ const BORROWER_LOANS_QUERY = `
 `;
 
 const LENDER_LOANS_QUERY = `
-  query TrustLendLenderLoans($userId: String, $walletAddress: String, $limit: Int!) {
+  query TrustLendLenderLoans(
+    $userId: String, $walletAddress: String,
+    $limit: Int!, $offset: Int, $after: String
+  ) {
     loans(
       first: $limit
+      offset: $offset
+      after: $after
       orderBy: createdAt
       orderDirection: desc
       where: { lenderId: $userId, lenderAddress: $walletAddress }
@@ -250,8 +309,8 @@ const LENDER_LOANS_QUERY = `
 `;
 
 const ADMIN_LOANS_QUERY = `
-  query TrustLendAdminLoans($limit: Int!) {
-    loans(first: $limit, orderBy: createdAt, orderDirection: desc) {
+  query TrustLendAdminLoans($limit: Int!, $offset: Int, $after: String) {
+    loans(first: $limit, offset: $offset, after: $after, orderBy: createdAt, orderDirection: desc) {
       id borrowerId borrowerAddress lenderId lenderAddress status principalAmount repaidAmount
       aprBps durationDays dueAt createdAt requestedAt escrowId
     }
@@ -259,9 +318,14 @@ const ADMIN_LOANS_QUERY = `
 `;
 
 const REPUTATION_EVENTS_QUERY = `
-  query TrustLendReputationEvents($userId: String, $walletAddress: String, $limit: Int!) {
+  query TrustLendReputationEvents(
+    $userId: String, $walletAddress: String,
+    $limit: Int!, $offset: Int, $after: String
+  ) {
     reputationEvents(
       first: $limit
+      offset: $offset
+      after: $after
       orderBy: createdAt
       orderDirection: desc
       where: { borrowerId: $userId, borrowerAddress: $walletAddress }
@@ -272,9 +336,14 @@ const REPUTATION_EVENTS_QUERY = `
 `;
 
 const ESCROW_EVENTS_QUERY = `
-  query TrustLendEscrowEvents($walletAddress: String, $limit: Int!) {
+  query TrustLendEscrowEvents(
+    $walletAddress: String,
+    $limit: Int!, $offset: Int, $after: String
+  ) {
     escrowEvents(
       first: $limit
+      offset: $offset
+      after: $after
       orderBy: createdAt
       orderDirection: desc
       where: { lenderAddress: $walletAddress }
@@ -284,12 +353,21 @@ const ESCROW_EVENTS_QUERY = `
   }
 `;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Public reader functions
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function getIndexedBorrowerReadModel(options: ReadOptions): Promise<IndexedDashboardReadModel> {
-  const limit = options.limit ?? DEFAULT_LIMIT;
   const variables = {
     userId: options.userId ?? "",
     walletAddress: options.walletAddress ?? "",
-    limit,
+    ...buildPaginationVariables(options),
+  };
+
+  const restParams = {
+    borrowerId: options.userId,
+    borrowerAddress: options.walletAddress,
+    ...buildRestPaginationParams(options),
   };
 
   const [loans, reputationEvents] = await Promise.all([
@@ -298,7 +376,7 @@ export async function getIndexedBorrowerReadModel(options: ReadOptions): Promise
       graphqlQueryEnv: "TRUSTLEND_INDEXER_BORROWER_LOANS_QUERY",
       restPath: "/loans",
       variables,
-      restParams: { borrowerId: options.userId, borrowerAddress: options.walletAddress, limit },
+      restParams,
       preferredKey: "loans",
     }),
     readIndexed<Record<string, unknown>>({
@@ -306,7 +384,7 @@ export async function getIndexedBorrowerReadModel(options: ReadOptions): Promise
       graphqlQueryEnv: "TRUSTLEND_INDEXER_REPUTATION_EVENTS_QUERY",
       restPath: "/reputation-events",
       variables,
-      restParams: { borrowerId: options.userId, borrowerAddress: options.walletAddress, limit },
+      restParams,
       preferredKey: "reputationEvents",
     }),
   ]);
@@ -319,11 +397,16 @@ export async function getIndexedBorrowerReadModel(options: ReadOptions): Promise
 }
 
 export async function getIndexedLenderReadModel(options: ReadOptions): Promise<IndexedDashboardReadModel> {
-  const limit = options.limit ?? DEFAULT_LIMIT;
   const variables = {
     userId: options.userId ?? "",
     walletAddress: options.walletAddress ?? "",
-    limit,
+    ...buildPaginationVariables(options),
+  };
+
+  const restParams = {
+    lenderId: options.userId,
+    lenderAddress: options.walletAddress,
+    ...buildRestPaginationParams(options),
   };
 
   const [loans, escrowEvents] = await Promise.all([
@@ -332,7 +415,7 @@ export async function getIndexedLenderReadModel(options: ReadOptions): Promise<I
       graphqlQueryEnv: "TRUSTLEND_INDEXER_LENDER_LOANS_QUERY",
       restPath: "/loans",
       variables,
-      restParams: { lenderId: options.userId, lenderAddress: options.walletAddress, limit },
+      restParams,
       preferredKey: "loans",
     }),
     readIndexed<Record<string, unknown>>({
@@ -340,7 +423,10 @@ export async function getIndexedLenderReadModel(options: ReadOptions): Promise<I
       graphqlQueryEnv: "TRUSTLEND_INDEXER_ESCROW_EVENTS_QUERY",
       restPath: "/escrow-events",
       variables,
-      restParams: { lenderAddress: options.walletAddress, limit },
+      restParams: {
+        lenderAddress: options.walletAddress,
+        ...buildRestPaginationParams(options),
+      },
       preferredKey: "escrowEvents",
     }),
   ]);
@@ -352,13 +438,20 @@ export async function getIndexedLenderReadModel(options: ReadOptions): Promise<I
   };
 }
 
-export async function getIndexedAdminReadModel(limit = DEFAULT_LIMIT): Promise<IndexedDashboardReadModel> {
+export async function getIndexedAdminReadModel(
+  limit?: number,
+  options?: PaginationOptions,
+): Promise<IndexedDashboardReadModel> {
+  const pagination: PaginationOptions = { ...options, limit: limit ?? options?.limit ?? DEFAULT_LIMIT };
+  const variables = buildPaginationVariables(pagination);
+  const restParams = buildRestPaginationParams(pagination);
+
   const loans = await readIndexed<Record<string, unknown>>({
     graphqlQuery: ADMIN_LOANS_QUERY,
     graphqlQueryEnv: "TRUSTLEND_INDEXER_ADMIN_LOANS_QUERY",
     restPath: "/loans",
-    variables: { limit },
-    restParams: { limit },
+    variables,
+    restParams,
     preferredKey: "loans",
   });
 

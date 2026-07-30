@@ -2,7 +2,8 @@
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::token;
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, Vec,
+    contract, contractclient, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN,
+    Env, Vec,
 };
 
 #[contractclient(name = "FlashLoanReceiverClient")]
@@ -40,6 +41,30 @@ pub enum InterestRateModel {
     Floating,
 }
 
+/// A single collateral entry: asset address + amount in that asset's smallest unit.
+#[contracttype]
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
+pub struct CollateralEntry {
+    pub asset: Address,
+    pub amount: i128,
+}
+
+/// Per-asset collateral configuration: LTV ratio (collateral factor) and
+/// optional oracle price feed for value normalization.
+#[contracttype]
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
+pub struct AssetCollateralConfig {
+    /// Collateral factor / LTV ratio in basis-points (e.g. 8000 = 80% LTV).
+    pub collateral_factor_bps: u32,
+    /// Whether the asset has an oracle price feed configured for USD normalization.
+    pub has_price_oracle: bool,
+    /// Volatility basis-points used in liquidation threshold calculations
+    /// (e.g. 500 = 5% expected volatility).
+    pub volatility_bps: u32,
+}
+
 /// A single loan record.
 #[contracttype]
 #[derive(Clone)]
@@ -48,8 +73,10 @@ pub struct LoanRequestInput {
     pub duration_days: u32,
     pub interest_rate_bps: u32,
     pub max_loan_amount: i128,
-    pub collateral_asset: Address,
-    pub collateral_amount: i128,
+    /// Collateral entries supporting this loan (multi-asset).
+    pub collateral_entries: Vec<CollateralEntry>,
+    /// Interest rate model: Fixed or Floating
+    pub rate_model: InterestRateModel,
 }
 
 #[contracttype]
@@ -76,10 +103,6 @@ pub struct LoanRecord {
     pub escrow_id: u32,
     /// Platform fee taken (1% of interest, in stroops)
     pub platform_fee: i128,
-    /// Collateral asset address (or XLM as default)
-    pub collateral_asset: Address,
-    /// Collateral amount in asset's smallest unit
-    pub collateral_amount: i128,
     /// Interest rate model: Fixed or Floating
     pub rate_model: InterestRateModel,
     /// Baseline rate at loan creation in bps (anchors floating calculations)
@@ -134,6 +157,17 @@ pub enum DataKey {
     RateSwitchCooldown(u32),
     /// Uncollected accrued platform fees for Treasury collection
     UncollectedFees,
+    // ── Multi-asset collateral vault ──────────────────────────────────────
+    /// Per-asset collateral configuration (stored in instance).
+    CollateralConfig(Address),
+    /// User's deposited collateral positions: map user -> Vec<CollateralEntry>.
+    UserCollateral(Address),
+    /// Price oracle address that can post price feeds for collateral assets.
+    PriceOracle,
+    /// Aggregated oracle price samples for a collateral asset.
+    OraclePriceSamples(Address),
+    /// TWAP fallback price for a collateral asset.
+    OracleTwapPrice(Address),
 }
 
 /// Default platform fee = 1 % of interest (100 bps) until governance changes it.
@@ -154,6 +188,18 @@ const RATE_SWITCH_FEE_BPS: u32 = 50;
 /// Cooldown between rate switches: 24 hours in seconds.
 const RATE_SWITCH_COOLDOWN_SECS: u64 = 86_400;
 
+/// Default collateral factor for assets without explicit config: 75% LTV.
+const DEFAULT_COLLATERAL_FACTOR_BPS: u32 = 7500;
+
+/// Price precision: 7 decimal places (matching XLM stroops convention).
+const PRICE_PRECISION: i128 = 10_000_000;
+
+/// Maximum allowed collateral factor (95% LTV).
+const MAX_COLLATERAL_FACTOR_BPS: u32 = 9500;
+
+/// Minimum allowed collateral factor (10% LTV).
+const MIN_COLLATERAL_FACTOR_BPS: u32 = 1000;
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -162,16 +208,6 @@ pub struct LendingContract;
 #[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl LendingContract {
-    // TODO (RWA Collateral Integration):
-    // 1. Compatibility Check for Customized Asset Contracts:
-    //    - Implement a validation helper `validate_rwa_token_compatibility(env: &Env, token_address: &Address)` to ensure
-    //      the token contract implements the standard SEP-41 Token interface or custom compliance controls (clawback, transfer rules).
-    //    - Store a whitelist of compatible tokenized assets (e.g. tokenized gold, US Treasury Bills) in instance storage.
-    // 2. On-chain Oracle Price Feed Queries:
-    //    - Integrate an oracle interface query to fetch real-time USD/XLM values for tokenized assets (e.g. XAU/USD, TBILL/USD).
-    //    - Use the price feed to verify that the value of the deposited RWA collateral meets the required loan-to-value (LTV) ratio
-    //      before approving or activating the loan.
-
     // ── Admin ─────────────────────────────────────────────────────────────────
 
     pub fn initialize(env: Env, admin: Address) {
@@ -443,7 +479,10 @@ impl LendingContract {
     }
 
     pub fn get_uncollected_fees(env: Env) -> i128 {
-        env.storage().instance().get(&DataKey::UncollectedFees).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::UncollectedFees)
+            .unwrap_or(0)
     }
 
     pub fn collect_fees(env: Env, caller: Address, treasury_address: Address) -> i128 {
@@ -486,20 +525,6 @@ impl LendingContract {
 
     /// Uncollateralized, single-transaction flash loan against the pool's own
     /// balance of `token`.
-    ///
-    /// Flow (all within this one call, hence one atomic ledger transaction):
-    ///   1. Verify the pool holds at least `amount` of `token`.
-    ///   2. Transfer `amount` of `token` to `receiver`.
-    ///   3. Invoke `receiver.execute_operation(token, amount, fee, self, params)`
-    ///      — the receiver's arbitrage/re-leveraging logic runs here and MUST
-    ///      transfer `amount + fee` back to this contract before returning.
-    ///   4. Verify the pool's balance grew by at least `fee`; if not, PANIC.
-    ///
-    /// A panic anywhere in this call — including inside the receiver's own
-    /// callback — aborts the WHOLE transaction on Soroban, so step 2's transfer
-    /// is rolled back along with everything else. There is no code path that
-    /// leaves the pool short: either the loan is fully repaid plus fee, or the
-    /// entire transaction (including the initial disbursement) never happened.
     pub fn flash_loan(env: Env, receiver: Address, token: Address, amount: i128, params: Bytes) {
         if amount <= 0 {
             panic!("Flash loan amount must be positive");
@@ -541,12 +566,356 @@ impl LendingContract {
         );
     }
 
+    // ── Multi-asset collateral vault ──────────────────────────────────────────
+
+    // ── Price Oracle (multisig-gated) ─────────────────────────────────────────
+
+    /// Register or rotate the authorized price oracle address (multisig-gated).
+    /// The price oracle can post per-asset USD price feeds used for
+    /// normalizing collateral values.
+    pub fn set_price_oracle(env: Env, caller: Address, oracle: Address) {
+        caller.require_auth();
+        Self::assert_multisig_admin(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::PriceOracle, &oracle);
+        env.events()
+            .publish((symbol_short!("oracle"), symbol_short!("set")), oracle);
+    }
+
+    /// Get the authorized price oracle address.
+    pub fn get_price_oracle(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::PriceOracle)
+            .expect("Price oracle not configured")
+    }
+
+    /// Store multiple oracle price samples for an asset.
+    ///
+    /// Each sample represents a provider quote. The price helper takes the
+    /// median so a single manipulated provider cannot skew valuation.
+    pub fn set_asset_oracle_prices(env: Env, caller: Address, asset: Address, prices: Vec<i128>) {
+        caller.require_auth();
+        Self::assert_multisig_admin(&env, &caller);
+
+        if prices.is_empty() {
+            panic!("At least one oracle price sample is required");
+        }
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::WhitelistedAsset(asset.clone()))
+        {
+            panic!("Asset is not whitelisted");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::OraclePriceSamples(asset.clone()), &prices);
+    }
+
+    /// Store a TWAP fallback price for an asset.
+    pub fn set_asset_twap_price(env: Env, caller: Address, asset: Address, price: i128) {
+        caller.require_auth();
+        Self::assert_multisig_admin(&env, &caller);
+
+        if price <= 0 {
+            panic!("TWAP price must be positive");
+        }
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::WhitelistedAsset(asset.clone()))
+        {
+            panic!("Asset is not whitelisted");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleTwapPrice(asset.clone()), &price);
+    }
+
+    // ── Asset collateral configuration (multisig-gated) ───────────────────────
+
+    /// Configure the collateral parameters for an asset (multisig-gated).
+    /// Sets the LTV ratio and volatility used for borrowing power and
+    /// liquidation threshold calculations.
+    ///
+    /// `collateral_factor_bps` — maximum percentage of the asset's value that
+    /// can be borrowed, in basis-points (e.g. 8000 = 80% LTV).
+    /// Clamped to [MIN_COLLATERAL_FACTOR_BPS, MAX_COLLATERAL_FACTOR_BPS].
+    ///
+    /// `has_price_oracle` — if true, the contract expects a price feed from
+    /// the authorized oracle; if false, the asset is valued at face value
+    /// (i.e. 1 unit = 1 USD) for borrowing power calculations.
+    ///
+    /// `volatility_bps` — estimated annualized volatility in bps, used in
+    /// dynamic liquidation threshold calculations.
+    pub fn set_asset_collateral_config(
+        env: Env,
+        caller: Address,
+        asset: Address,
+        config: AssetCollateralConfig,
+    ) {
+        caller.require_auth();
+        Self::assert_multisig_admin(&env, &caller);
+
+        // Validate — must be a whitelisted asset
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::WhitelistedAsset(asset.clone()))
+        {
+            panic!("Asset is not whitelisted");
+        }
+
+        // Clamp collateral factor to safe bounds
+        let clamped_factor = config
+            .collateral_factor_bps
+            .max(MIN_COLLATERAL_FACTOR_BPS)
+            .min(MAX_COLLATERAL_FACTOR_BPS);
+
+        let clamped_volatility = config.volatility_bps.min(10_000); // max 100%
+
+        let safe_config = AssetCollateralConfig {
+            collateral_factor_bps: clamped_factor,
+            has_price_oracle: config.has_price_oracle,
+            volatility_bps: clamped_volatility,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CollateralConfig(asset.clone()), &safe_config);
+
+        env.events().publish(
+            (symbol_short!("colconf"), symbol_short!("set")),
+            (asset, clamped_factor, clamped_volatility),
+        );
+    }
+
+    /// Get the collateral configuration for an asset.
+    /// Returns default config (75% LTV, no oracle, 0 volatility) if not set.
+    pub fn get_asset_collateral_config(env: Env, asset: Address) -> AssetCollateralConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::CollateralConfig(asset.clone()))
+            .unwrap_or(AssetCollateralConfig {
+                collateral_factor_bps: DEFAULT_COLLATERAL_FACTOR_BPS,
+                has_price_oracle: false,
+                volatility_bps: 0,
+            })
+    }
+
+    // ── Collateral deposit / withdraw (borrower-facing) ─────────────────────
+
+    /// Deposit additional collateral to the borrower's vault position.
+    /// The caller must be the borrower.
+    /// `asset` must be whitelisted.
+    /// `amount` must be positive.
+    ///
+    /// This is a bookkeeping operation — the actual asset transfer is handled
+    /// via token transfer before this call.
+    pub fn deposit_collateral(env: Env, borrower: Address, asset: Address, amount: i128) {
+        borrower.require_auth();
+        Self::assert_not_paused(&env);
+
+        if amount <= 0 {
+            panic!("Collateral amount must be positive");
+        }
+
+        // Asset must be whitelisted
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::WhitelistedAsset(asset.clone()))
+        {
+            panic!("Asset is not whitelisted");
+        }
+
+        // Get or create user's collateral entries
+        let key = DataKey::UserCollateral(borrower.clone());
+        let entries: Vec<CollateralEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        // Find existing entry or append new one
+        let mut found = false;
+        let mut new_entries = Vec::new(&env);
+        for entry in entries.iter() {
+            if entry.asset == asset {
+                // Update existing entry
+                let new_amount = entry
+                    .amount
+                    .checked_add(amount)
+                    .expect("Overflow adding collateral");
+                new_entries.push_back(CollateralEntry {
+                    asset: entry.asset.clone(),
+                    amount: new_amount,
+                });
+                found = true;
+            } else {
+                new_entries.push_back(entry);
+            }
+        }
+        if !found {
+            new_entries.push_back(CollateralEntry {
+                asset: asset.clone(),
+                amount,
+            });
+        }
+
+        env.storage()
+            .persistent()
+            .set(&key, &new_entries);
+
+        env.events().publish(
+            (symbol_short!("collat"), symbol_short!("deposit")),
+            (borrower, asset, amount),
+        );
+    }
+
+    /// Withdraw collateral from the borrower's vault position.
+    /// The caller must be the borrower.
+    /// `amount` must be positive and not exceed the current balance for that asset.
+    ///
+    /// After withdrawal, checks that the borrower's remaining collateral
+    /// still covers their active loan positions. If not, the withdrawal panics.
+    /// This prevents borrowers from withdrawing collateral that would
+    /// leave their loans under-collateralized.
+    pub fn withdraw_collateral(env: Env, borrower: Address, asset: Address, amount: i128) {
+        borrower.require_auth();
+        Self::assert_not_paused(&env);
+
+        if amount <= 0 {
+            panic!("Withdrawal amount must be positive");
+        }
+
+        let key = DataKey::UserCollateral(borrower.clone());
+        let entries: Vec<CollateralEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("No collateral entries found for borrower");
+
+        // Find the asset and verify sufficient balance
+        let mut found = false;
+        let mut remaining_amount = 0i128;
+        let mut new_entries = Vec::new(&env);
+        for entry in entries.iter() {
+            if entry.asset == asset {
+                if entry.amount < amount {
+                    panic!("Insufficient collateral balance for withdrawal");
+                }
+                remaining_amount = entry
+                    .amount
+                    .checked_sub(amount)
+                    .expect("Underflow subtracting collateral");
+                found = true;
+                if remaining_amount > 0 {
+                    new_entries.push_back(CollateralEntry {
+                        asset: entry.asset.clone(),
+                        amount: remaining_amount,
+                    });
+                }
+                // If remaining_amount == 0, we skip — removing the entry entirely
+            } else {
+                new_entries.push_back(entry);
+            }
+        }
+
+        if !found {
+            panic!("No collateral of the specified asset found");
+        }
+
+        // Check borrowing power constraint: after withdrawal, borrowing power
+        // must still cover all active loans.
+        let borrowing_power = Self::compute_borrowing_power_from_entries(
+            &env,
+            &new_entries,
+        );
+        let total_active_debt: i128 = Self::get_total_active_debt_of_borrower(&env, &borrower);
+
+        if borrowing_power < total_active_debt {
+            panic!(
+                "Withdrawal would leave loans under-collateralized: borrowing power {} < debt {}",
+                borrowing_power, total_active_debt,
+            );
+        }
+
+        // Update storage
+        if new_entries.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage()
+                .persistent()
+                .set(&key, &new_entries);
+        }
+
+        env.events().publish(
+            (symbol_short!("collat"), symbol_short!("withdraw")),
+            (borrower, asset, amount, remaining_amount),
+        );
+    }
+
+    // ── Query functions for collateral vault ─────────────────────────────────
+
+    /// Get all collateral entries for a borrower.
+    pub fn get_user_collateral_entries(env: Env, borrower: Address) -> Vec<CollateralEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserCollateral(borrower))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get the total borrowing power for a borrower in the base asset's
+    /// smallest unit (stroops for XLM).
+    ///
+    /// Borrowing power = sum over all collateral positions of:
+    ///   amount * price * collateral_factor_bps / 10_000
+    ///
+    /// Where price is either:
+    ///   - The oracle price (if configured), normalized to the base asset
+    ///   - Or 1.0 (face value) if no oracle is configured
+    pub fn get_borrowing_power(env: Env, borrower: Address) -> i128 {
+        let entries = Self::get_user_collateral_entries(env.clone(), borrower);
+        Self::compute_borrowing_power_from_entries(&env, &entries)
+    }
+
+    /// Get the total collateral value for display purposes (not LTV-adjusted).
+    /// Returns the sum of each asset's amount * price, normalized to the
+    /// base asset unit.
+    pub fn get_total_collateral_value(env: Env, borrower: Address) -> i128 {
+        let entries = Self::get_user_collateral_entries(env.clone(), borrower);
+        let mut total_value: i128 = 0;
+        for entry in entries.iter() {
+            let config = Self::get_asset_collateral_config(env.clone(), entry.asset.clone());
+            let price = Self::get_asset_price(&env, &entry.asset, &config);
+            let value = entry
+                .amount
+                .checked_mul(price)
+                .expect("Overflow computing collateral value")
+                / PRICE_PRECISION;
+            total_value = total_value
+                .checked_add(value)
+                .expect("Overflow summing collateral values");
+        }
+        total_value
+    }
+
     // ── Loan lifecycle ────────────────────────────────────────────────────────
 
     /// Borrower creates a loan request.
     /// `interest_rate_bps` and `max_loan` are fetched off-chain from the
     /// ReputationContract and passed in so we avoid a cross-contract call
     /// on the critical path (cheaper, simpler on testnet).
+    ///
+    /// The function checks that the borrower has sufficient borrowing power
+    /// (from multi-asset collateral) to cover the requested loan amount.
     pub fn create_loan_request(
         env: Env,
         borrower: Address,
@@ -560,8 +929,8 @@ impl LendingContract {
             duration_days,
             interest_rate_bps,
             max_loan_amount,
-            collateral_asset,
-            collateral_amount,
+            collateral_entries,
+            rate_model,
         } = request;
 
         if amount <= 0 {
@@ -573,16 +942,33 @@ impl LendingContract {
         if duration_days == 0 || duration_days > 365 {
             panic!("Duration must be between 1 and 365 days");
         }
-        if collateral_amount <= 0 {
-            panic!("Collateral amount must be positive");
+        if collateral_entries.is_empty() {
+            panic!("At least one collateral entry is required");
         }
-        // Check if asset is whitelisted
-        if !env
-            .storage()
-            .instance()
-            .has(&DataKey::WhitelistedAsset(collateral_asset.clone()))
-        {
-            panic!("Collateral asset is not whitelisted");
+
+        // Validate that all collateral assets are whitelisted
+        for entry in collateral_entries.iter() {
+            if !env
+                .storage()
+                .instance()
+                .has(&DataKey::WhitelistedAsset(entry.asset.clone()))
+            {
+                panic!("Collateral asset is not whitelisted");
+            }
+            if entry.amount <= 0 {
+                panic!("Each collateral amount must be positive");
+            }
+        }
+
+        // Check borrowing power: total borrowing power must be >= loan amount
+        let borrowing_power =
+            Self::compute_borrowing_power_from_entries(&env, &collateral_entries);
+
+        if borrowing_power < amount {
+            panic!(
+                "Insufficient borrowing power: {} < {}",
+                borrowing_power, amount
+            );
         }
 
         // interest = principal × rate_bps × days / (10_000 × 365)
@@ -627,11 +1013,7 @@ impl LendingContract {
             status: LoanStatus::Pending,
             escrow_id: 0,
             platform_fee,
-            collateral_asset,
-            collateral_amount,
-            // New loans always start on the fixed model; borrowers opt into
-            // floating rates afterwards via `switch_rate_model`.
-            rate_model: InterestRateModel::Fixed,
+            rate_model,
             base_rate_bps: interest_rate_bps,
             last_rate_update: now,
         };
@@ -639,13 +1021,21 @@ impl LendingContract {
         env.storage()
             .persistent()
             .set(&DataKey::Loan(loan_id), &loan);
-        env.storage().instance().set(&DataKey::LoanCount, &loan_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::LoanCount, &loan_id);
 
-        let current_fees: i128 = env.storage().instance().get(&DataKey::UncollectedFees).unwrap_or(0);
-        env.storage().instance().set(&DataKey::UncollectedFees, &(current_fees + platform_fee));
+        let current_fees: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UncollectedFees)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::UncollectedFees, &(current_fees + platform_fee));
 
         // Track per-borrower list
-        Self::push_loan_id_for_borrower(&env, &borrower, loan_id);
+        Self::store_borrower_loan_id(&env, &borrower, loan_id);
 
         env.events().publish(
             (symbol_short!("loan"), symbol_short!("request")),
@@ -1027,7 +1417,145 @@ impl LendingContract {
             .expect("Index out of bounds")
     }
 
+    /// Get the total active debt for a borrower across all their active loans.
+    /// Used to enforce collateralization on withdrawal.
+    fn get_total_active_debt_of_borrower(env: &Env, borrower: &Address) -> i128 {
+        let loan_count = Self::get_borrower_loan_count(env.clone(), borrower.clone());
+        let mut total_debt: i128 = 0;
+        for i in 0..loan_count {
+            let loan_id = Self::get_borrower_loan_at(env.clone(), borrower.clone(), i);
+            let loan = Self::get_loan(env.clone(), loan_id);
+            if loan.status == LoanStatus::Active || loan.status == LoanStatus::Approved {
+                total_debt = total_debt
+                    .checked_add(loan.remaining_due)
+                    .expect("Overflow summing active debt");
+            }
+        }
+        total_debt
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// Compute borrowing power from a set of collateral entries.
+    ///
+    /// Borrowing power = sum over entries of:
+    ///   (amount * price * collateral_factor_bps) / (PRICE_PRECISION * 10_000)
+    ///
+    /// Where `price` is the oracle price if configured, or PRICE_PRECISION (1.0)
+    /// if no oracle is configured.
+    fn compute_borrowing_power_from_entries(env: &Env, entries: &Vec<CollateralEntry>) -> i128 {
+        let mut total_power: i128 = 0;
+        for entry in entries.iter() {
+            let config = Self::get_asset_collateral_config(env.clone(), entry.asset.clone());
+            let price = Self::get_asset_price(env, &entry.asset, &config);
+            // Adjusted value = amount * price / PRICE_PRECISION (gives value in base units)
+            let value = entry
+                .amount
+                .checked_mul(price)
+                .expect("Overflow computing entry value")
+                / PRICE_PRECISION; // normalize price
+            // Apply collateral factor
+            let adjusted = value
+                .checked_mul(config.collateral_factor_bps as i128)
+                .expect("Overflow applying collateral factor")
+                / 10_000;
+            total_power = total_power
+                .checked_add(adjusted)
+                .expect("Overflow summing borrowing power");
+        }
+        total_power
+    }
+
+    /// Get the price of an asset in base asset units (stroops-equivalent).
+    ///
+    /// The price is stored as:
+    ///   price = (amount of base asset) * PRICE_PRECISION / (amount of collateral asset)
+    ///
+    /// For example, if 1 XLM = $0.10 USD, the price would be:
+    ///   (1 XLM in stroops = 10_000_000) * PRICE_PRECISION / 1 = 10_000_000 * 10_000_000 / 1
+    ///
+    /// But for collateral valuation, we use a simpler scheme:
+    ///   - If the asset has an oracle, price is posted by the oracle
+    ///   - If not, price = PRICE_PRECISION (i.e. face value = 1.0 base unit per asset unit)
+    ///
+    /// For now, without a live oracle, all assets are valued at face value (1:1).
+    /// This still allows testing the multi-collateral framework with different
+    /// collateral factors.
+    fn get_asset_price(env: &Env, asset: &Address, config: &AssetCollateralConfig) -> i128 {
+        if config.has_price_oracle {
+            let samples: Vec<i128> = env
+                .storage()
+                .instance()
+                .get(&DataKey::OraclePriceSamples(asset.clone()))
+                .unwrap_or(Vec::new(env));
+
+            if !samples.is_empty() {
+                return Self::median_price(env, &samples);
+            }
+
+            if let Some(twap_price) = env
+                .storage()
+                .instance()
+                .get::<DataKey, i128>(&DataKey::OracleTwapPrice(asset.clone()))
+            {
+                return twap_price;
+            }
+        }
+
+        // No oracle or no live price data — fall back to face value.
+        PRICE_PRECISION
+    }
+
+    fn median_price(env: &Env, prices: &Vec<i128>) -> i128 {
+        let len = prices.len();
+        if len == 0 {
+            panic!("No oracle price samples available");
+        }
+
+        let mut remaining = Vec::new(env);
+        for price in prices.iter() {
+            remaining.push_back(price);
+        }
+
+        let midpoint = len / 2;
+        let even = len % 2 == 0;
+        let mut lower = 0i128;
+
+        for step in 0..=midpoint {
+            let mut min_idx: u32 = 0;
+            let mut min_value = remaining.get(0).expect("No oracle price samples available");
+
+            let mut idx: u32 = 1;
+            while idx < remaining.len() {
+                let value = remaining.get(idx).expect("No oracle price samples available");
+                if value < min_value {
+                    min_value = value;
+                    min_idx = idx;
+                }
+                idx += 1;
+            }
+
+            remaining.remove(min_idx);
+
+            if !even && step == midpoint {
+                return min_value;
+            }
+
+            if even {
+                if step == midpoint - 1 {
+                    lower = min_value;
+                }
+                if step == midpoint {
+                    return lower
+                        .checked_add(min_value)
+                        .expect("Overflow computing median price")
+                        / 2;
+                }
+            }
+        }
+
+        panic!("Unable to compute median oracle price")
+    }
 
     /// interest = principal × rate_bps × days / (10_000 × 365)
     ///
@@ -1042,22 +1570,34 @@ impl LendingContract {
         numerator / (10_000_i128 * 365)
     }
 
-    fn push_loan_id_for_borrower(env: &Env, borrower: &Address, loan_id: u32) {
+    fn store_borrower_loan_id(env: &Env, borrower: &Address, loan_id: u32) {
         let count_key = DataKey::BorrowerLoanCount(borrower.clone());
-        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0);
         env.storage()
             .persistent()
             .set(&DataKey::BorrowerLoanAt(borrower.clone(), count), &loan_id);
-        env.storage().persistent().set(&count_key, &(count + 1));
+        env.storage()
+            .persistent()
+            .set(&count_key, &(count + 1));
     }
 
     fn push_loan_id_for_lender(env: &Env, lender: &Address, loan_id: u32) {
         let count_key = DataKey::LenderLoanCount(lender.clone());
-        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0);
         env.storage()
             .persistent()
             .set(&DataKey::LenderLoanAt(lender.clone(), count), &loan_id);
-        env.storage().persistent().set(&count_key, &(count + 1));
+        env.storage()
+            .persistent()
+            .set(&count_key, &(count + 1));
     }
 
     fn assert_admin(env: &Env, caller: &Address) {

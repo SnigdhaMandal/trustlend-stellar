@@ -1,4 +1,4 @@
-﻿-- TrustLend core schema for Supabase
+-- TrustLend core schema for Supabase
 -- Apply first
 
 create extension if not exists pgcrypto;
@@ -275,6 +275,7 @@ create index if not exists idx_loans_borrower_id on public.loans(borrower_id);
 create index if not exists idx_loans_pool_id on public.loans(pool_id);
 create index if not exists idx_loans_status on public.loans(status);
 create index if not exists idx_loans_due_at on public.loans(due_at);
+create index if not exists idx_loans_borrower_status on public.loans(borrower_id, status);
 
 create table if not exists public.loan_repayments (
   id uuid primary key default gen_random_uuid(),

@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuthenticatedUser } from "@/lib/auth/session";
+import { enforceRouteRateLimit } from "@/lib/rate-limit";
 import { getServerSupabaseClient } from "@/lib/supabase/server";
 import { isRedirectError } from "next/dist/client/components/redirect-error";
 
 export async function GET(request: NextRequest) {
   try {
+    // ── Rate limit ───────────────────────────────────────────────────────────
+    const rateLimited = await enforceRouteRateLimit(request);
+    if (rateLimited) return rateLimited;
+
     const { user } = await requireAuthenticatedUser("borrower");
     const loanId = request.nextUrl.searchParams.get("loanId");
 

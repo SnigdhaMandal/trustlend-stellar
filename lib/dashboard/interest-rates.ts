@@ -95,6 +95,67 @@ export function computeFixedRate(
   return Math.min(MAX_FLOATING_RATE_BPS, Math.max(MIN_FLOATING_RATE_BPS, rawRate));
 }
 
+// ─── JumpRateModel (matches on-chain pooled_lending contract) ──────────────
+
+export interface JumpRateParams {
+  totalBorrowed: bigint;
+  totalSupply: bigint;
+  baseRateBps: number;
+  multiplierPerSlopeBps: number;
+  jumpMultiplierBps: number;
+  kinkBps: number;
+  reserveFactorBps: number;
+}
+
+const MAX_BPS = 10_000;
+
+/**
+ * Compute utilization in basis points (0-10000).
+ * Returns 0 if total_supply is zero or negative.
+ */
+export function computeUtilizationBps(totalBorrowed: bigint, totalSupply: bigint): number {
+  if (totalSupply <= 0n || totalBorrowed <= 0n) return 0;
+  const util = Number((totalBorrowed * BigInt(MAX_BPS)) / totalSupply);
+  return Math.min(MAX_BPS, Math.max(0, util));
+}
+
+/**
+ * Compute the borrow APY in basis points using the JumpRateModel.
+ *
+ * Below kink:  baseRate + (utilization / kink) * multiplier
+ * Above kink:  baseRate + multiplier + ((utilization - kink) / (10000 - kink)) * jumpMultiplier
+ */
+export function computeJumpRateBorrowApy(params: JumpRateParams): number {
+  const utilBps = computeUtilizationBps(params.totalBorrowed, params.totalSupply);
+  if (utilBps === 0) return params.baseRateBps;
+
+  if (utilBps <= params.kinkBps) {
+    const slopeComponent = Math.floor((utilBps * params.multiplierPerSlopeBps) / params.kinkBps);
+    return params.baseRateBps + slopeComponent;
+  }
+
+  const excess = utilBps - params.kinkBps;
+  const denominator = MAX_BPS - params.kinkBps;
+  const jumpComponent = Math.floor((excess * params.jumpMultiplierBps) / denominator);
+  return params.baseRateBps + params.multiplierPerSlopeBps + jumpComponent;
+}
+
+/**
+ * Compute the supply APY in basis points using the JumpRateModel.
+ *
+ * supplyRate = borrowRate * utilization * (1 - reserveFactor)
+ */
+export function computeJumpRateSupplyApy(params: JumpRateParams): number {
+  const utilBps = computeUtilizationBps(params.totalBorrowed, params.totalSupply);
+  if (utilBps === 0) return 0;
+
+  const borrowApy = computeJumpRateBorrowApy(params);
+  if (borrowApy === 0) return 0;
+
+  const rfAdjustment = MAX_BPS - params.reserveFactorBps;
+  return Math.floor((borrowApy * utilBps * rfAdjustment) / MAX_BPS / MAX_BPS);
+}
+
 // ─── Switch Logic ────────────────────────────────────────────────────────────
 
 /**

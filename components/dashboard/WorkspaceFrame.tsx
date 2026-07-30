@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { NotificationWidget } from "./NotificationWidget";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { RpcWarningBanner } from "@/components/ui/RpcWarningBanner";
 
 interface WorkspaceLink {
   href: string;
@@ -161,6 +162,7 @@ export function WorkspaceFrame({
           </aside>
 
           <div className="workspace-main-panel">
+            <RpcWarningBanner />
             <header className="workspace-topbar">
               <div className="workspace-topbar-left">
                 <button 

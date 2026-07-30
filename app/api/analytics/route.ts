@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { enforceRouteRateLimit } from "@/lib/rate-limit";
 import {
   ANALYTICS_CACHE_TTL_SECONDS,
   buildPlatformAnalyticsResponse,
@@ -19,7 +20,11 @@ function getAnalyticsHeaders(cacheState: "hit" | "miss") {
   };
 }
 
-export async function GET(_request?: Request) {
+export async function GET(request: NextRequest) {
+  // ── Rate limit ─────────────────────────────────────────────────────────────
+  const rateLimited = await enforceRouteRateLimit(request);
+  if (rateLimited) return rateLimited;
+
   const cachedResponse = await getCachedPlatformAnalytics();
   if (cachedResponse) {
     return NextResponse.json(cachedResponse, {

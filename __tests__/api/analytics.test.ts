@@ -117,7 +117,8 @@ describe("GET /api/analytics", () => {
 
     const response = await GET({
       nextUrl: new URL("http://localhost/api/analytics"),
-    } as NextRequest);
+      headers: new Headers({ "x-forwarded-for": "127.0.0.1" }),
+    } as unknown as NextRequest);
 
     expect(response.status).toBe(200);
     expect(mockGetServiceRoleClient).not.toHaveBeenCalled();
@@ -132,7 +133,8 @@ describe("GET /api/analytics", () => {
 
     const response = await GET({
       nextUrl: new URL("http://localhost/api/analytics"),
-    } as NextRequest);
+      headers: new Headers({ "x-forwarded-for": "127.0.0.1" }),
+    } as unknown as NextRequest);
 
     expect(response.status).toBe(200);
 
@@ -156,7 +158,8 @@ describe("GET /api/analytics", () => {
 
     const response = await GET({
       nextUrl: new URL("http://localhost/api/analytics"),
-    } as NextRequest);
+      headers: new Headers({ "x-forwarded-for": "127.0.0.1" }),
+    } as unknown as NextRequest);
 
     expect(response.status).toBe(503);
     const payload = await response.json();

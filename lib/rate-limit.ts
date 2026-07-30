@@ -25,11 +25,17 @@ const ROUTE_POLICIES: Record<string, RateLimitPolicy> = {
   "/api/loans/apply": { limit: 5, window: "10 m" },
   "/api/loans/fund": { limit: 10, window: "10 m" },
   "/api/loans/repay": { limit: 10, window: "10 m" },
+  "/api/loans/repay/preflight": { limit: 30, window: "1 m" },
+  "/api/loans/repayments": { limit: 30, window: "1 m" },
+  "/api/pools": { limit: 60, window: "1 m" },
   "/api/pools/deposit": { limit: 15, window: "10 m" },
   "/api/pools/withdraw": { limit: 10, window: "10 m" },
   "/api/sponsor": { limit: 10, window: "1 m" },
   "/api/tasks/complete": { limit: 30, window: "10 m" },
   "/api/notifications/clear": { limit: 20, window: "1 m" },
+  "/api/kyc/token": { limit: 10, window: "1 m" },
+  "/api/kyc/webhook": { limit: 20, window: "10 m" },
+  "/api/analytics": { limit: 60, window: "1 m" },
 };
 
 const localWindowStore = new Map<string, { count: number; reset: number }>();
@@ -150,6 +156,33 @@ async function getUpstashRateLimit(
   }
 }
 
+// ─── Admin / whitelist bypass ────────────────────────────────────────────────
+
+/**
+ * Check if the request carries a valid admin bearer token.
+ * Requests with `Authorization: Bearer <ADMIN_SECRET_KEY>` bypass rate limits.
+ */
+function isAdminRequest(request: NextRequest): boolean {
+  const adminSecret = process.env.ADMIN_SECRET_KEY;
+  if (!adminSecret) return false;
+
+  const authHeader = request.headers.get("authorization") ?? "";
+  return authHeader === `Bearer ${adminSecret}`;
+}
+
+/**
+ * Check if the request IP is in the whitelist.
+ * Configure via `RATE_LIMIT_WHITELIST` env var (comma-separated IPs/CIDR).
+ */
+function isWhitelistedIp(request: NextRequest): boolean {
+  const whitelistCsv = process.env.RATE_LIMIT_WHITELIST;
+  if (!whitelistCsv) return false;
+
+  const ip = getRequestIdentifier(request);
+  const whitelisted = whitelistCsv.split(",").map((s) => s.trim()).filter(Boolean);
+  return whitelisted.includes(ip);
+}
+
 function getRequestIdentifier(request: NextRequest): string {
   const ip =
     request.headers.get("x-vercel-ip-address") ||
@@ -158,7 +191,22 @@ function getRequestIdentifier(request: NextRequest): string {
   return ip;
 }
 
+/**
+ * Apply rate limiting to a Next.js API route.
+ *
+ * Returns a `NextResponse` with status 429 if the request is rate-limited,
+ * or `null` if the request should proceed.
+ *
+ * **Bypass:** Requests with `Authorization: Bearer <ADMIN_SECRET_KEY>` or
+ * from whitelisted IPs (configured via `RATE_LIMIT_WHITELIST` env var) skip
+ * rate limiting entirely.
+ */
 export async function enforceRouteRateLimit(request: NextRequest) {
+  // ── Admin / whitelist bypass ───────────────────────────────────────────────
+  if (isAdminRequest(request) || isWhitelistedIp(request)) {
+    return null;
+  }
+
   const pathname = request.nextUrl.pathname;
   const policy = getPolicy(pathname);
   const identifier = `${pathname}:${getRequestIdentifier(request)}`;

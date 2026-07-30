@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { enforceRouteRateLimit } from "@/lib/rate-limit";
 import { getServiceRoleClient } from "@/lib/supabase/server";
 import { fetchPools } from "@/lib/db/pools";
 
@@ -35,6 +36,10 @@ import { fetchPools } from "@/lib/db/pools";
  */
 export async function GET(request: NextRequest) {
   try {
+    // ── Rate limit ───────────────────────────────────────────────────────────
+    const rateLimited = await enforceRouteRateLimit(request);
+    if (rateLimited) return rateLimited;
+
     const supabase = getServiceRoleClient();
     if (!supabase) {
       return NextResponse.json(

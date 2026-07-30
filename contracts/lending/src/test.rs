@@ -6,7 +6,7 @@ extern crate std;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    token, Address, Env,
+    token, vec, Address, Env, Vec,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -58,9 +58,15 @@ fn test_create_loan_request_basic() {
             duration_days: days,
             interest_rate_bps: rate_bps,
             max_loan_amount: max_loan,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
     assert_eq!(loan_id, 1);
 
@@ -68,10 +74,7 @@ fn test_create_loan_request_basic() {
     assert_eq!(loan.amount, principal);
     assert_eq!(loan.duration_days, days);
     assert_eq!(loan.interest_rate_bps, rate_bps);
-    assert!(
-        loan.total_due > principal,
-        "total_due must exceed principal"
-    );
+    assert!(loan.total_due > principal, "total_due must exceed principal");
     assert_eq!(loan.remaining_due, loan.total_due);
     assert_eq!(loan.status, LoanStatus::Pending);
 }
@@ -88,17 +91,22 @@ fn test_interest_calculation_is_correct() {
     let days: u32 = 365;
     let expected_interest: i128 = principal * 1500 / 10_000; // = 1 500 XLM
 
-    let loan_id =
-        client.create_loan_request(
+    let loan_id = client.create_loan_request(
         &borrower,
         &LoanRequestInput {
             amount: principal,
             duration_days: days,
             interest_rate_bps: rate_bps,
             max_loan_amount: (principal * 2),
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
     let loan = client.get_loan(&loan_id);
 
@@ -124,9 +132,15 @@ fn test_create_loan_max_duration_365_days() {
             duration_days: days,
             interest_rate_bps: rate_bps,
             max_loan_amount: max_loan,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.duration_days, 365);
@@ -146,9 +160,15 @@ fn test_create_loan_min_duration_1_day() {
             duration_days: 1,
             interest_rate_bps: 1500,
             max_loan_amount: 100_000_0000000,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.duration_days, 1);
@@ -161,28 +181,41 @@ fn test_create_loan_min_duration_1_day() {
 /// must NOT overflow — this is the extreme-but-legal boundary.
 #[test]
 fn test_no_overflow_at_maximum_valid_inputs() {
-    let (env, contract_id, _admin, borrower, collateral_asset) = setup();
+    let (env, contract_id, admin, borrower, collateral_asset) = setup();
     let client = LendingContractClient::new(&env, &contract_id);
+
+    // Set high collateral factor so borrowing power check passes
+    client.set_asset_collateral_config(
+        &admin,
+        &collateral_asset,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 9500,
+            has_price_oracle: false,
+            volatility_bps: 0,
+        },
+    );
 
     // Platinum tier max = 100 000 XLM = 100_000 * 10_000_000 stroops
     let principal: i128 = 100_000_0000000_i128; // 100 000 XLM
     let rate_bps: u32 = 1500; // highest rate (None tier)
     let days: u32 = 365; // maximum duration
 
-    // Verify the multiplication fits in i128 without panicking:
-    // principal × rate_bps × days = 100_000_0000000 × 1500 × 365 ≈ 5.475 × 10^19
-    // i128::MAX ≈ 1.7 × 10^38 — plenty of headroom.
-    let loan_id =
-        client.create_loan_request(
+    let loan_id = client.create_loan_request(
         &borrower,
         &LoanRequestInput {
             amount: principal,
             duration_days: days,
             interest_rate_bps: rate_bps,
             max_loan_amount: principal,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 200_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
     let loan = client.get_loan(&loan_id);
     assert!(loan.total_due > principal);
@@ -204,9 +237,15 @@ fn test_overflow_panics_with_near_max_principal() {
             duration_days: 365,
             interest_rate_bps: 1500,
             max_loan_amount: I128_MAX,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
 }
 
@@ -228,9 +267,15 @@ fn test_overflow_panics_at_second_multiplication() {
             duration_days: 365,
             interest_rate_bps: 1500,
             max_loan_amount: I128_MAX,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
 }
 
@@ -250,9 +295,15 @@ fn test_duration_zero_is_rejected() {
             duration_days: 0,
             interest_rate_bps: 1500,
             max_loan_amount: 100_000_0000000,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
 }
 
@@ -270,9 +321,15 @@ fn test_duration_366_is_rejected() {
             duration_days: 366,
             interest_rate_bps: 1500,
             max_loan_amount: 100_000_0000000,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
 }
 
@@ -290,9 +347,15 @@ fn test_zero_amount_is_rejected() {
             duration_days: 30,
             interest_rate_bps: 1500,
             max_loan_amount: 100_000_0000000,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
 }
 
@@ -311,9 +374,62 @@ fn test_amount_over_max_is_rejected() {
             duration_days: 30,
             interest_rate_bps: 1500,
             max_loan_amount: max_loan,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
+    );
+}
+
+/// Empty collateral entries must be rejected.
+#[test]
+#[should_panic(expected = "At least one collateral entry is required")]
+fn test_empty_collateral_entries_rejected() {
+    let (env, contract_id, _admin, borrower, _collateral_asset) = setup();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.create_loan_request(
+        &borrower,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1000,
+            max_loan_amount: 100_000_0000000,
+            collateral_entries: Vec::new(&env),
+            rate_model: InterestRateModel::Fixed,
+        },
+    );
+}
+
+/// Non-whitelisted collateral asset must be rejected.
+#[test]
+#[should_panic(expected = "Collateral asset is not whitelisted")]
+fn test_non_whitelisted_collateral_asset_rejected() {
+    let (env, contract_id, _admin, borrower, _collateral_asset) = setup();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let random_asset = Address::generate(&env);
+    client.create_loan_request(
+        &borrower,
+        &LoanRequestInput {
+            amount: 1_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1000,
+            max_loan_amount: 100_000_0000000,
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: random_asset,
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
 }
 
@@ -329,17 +445,22 @@ fn test_due_at_computed_correctly() {
     env.ledger().set_timestamp(1_000_000_000_u64);
 
     let days: u32 = 365;
-    let loan_id =
-        client.create_loan_request(
+    let loan_id = client.create_loan_request(
         &borrower,
         &LoanRequestInput {
             amount: 1_000_0000000,
             duration_days: days,
             interest_rate_bps: 1500,
             max_loan_amount: 100_000_0000000,
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
     let loan = client.get_loan(&loan_id);
 
@@ -359,17 +480,22 @@ fn test_platform_fee_is_one_percent_of_interest() {
     let rate_bps: u32 = 1500;
     let days: u32 = 365;
 
-    let loan_id =
-        client.create_loan_request(
+    let loan_id = client.create_loan_request(
         &borrower,
         &LoanRequestInput {
             amount: principal,
             duration_days: days,
             interest_rate_bps: rate_bps,
             max_loan_amount: (principal * 2),
-            collateral_asset: collateral_asset,
-            collateral_amount: 100_000_0000000,
-        }
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: collateral_asset.clone(),
+                    amount: 100_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
     );
     let loan = client.get_loan(&loan_id);
 
@@ -423,17 +549,14 @@ fn test_liquidation_threshold_clamping_bounds() {
     let client = LendingContractClient::new(&env, &contract_id);
 
     // Upper bound clamp: Reputation = 1000, Volatility = 0
-    // Calculated: 7500 + 1500 = 9000
     let threshold = client.calculate_liquidation_threshold(&1000, &0);
     assert_eq!(threshold, 9000);
 
     // Check Reputation = 2000 (abnormal), Volatility = 0
-    // Calculated: 7500 + 3000 = 10500 -> Clamped to 9000
     let threshold = client.calculate_liquidation_threshold(&2000, &0);
     assert_eq!(threshold, 9000);
 
     // Lower bound clamp: Reputation = 0, Volatility = 8000 (80% volatility)
-    // Calculated: 7500 - 4000 = 3500 -> Clamped to 5000
     let threshold = client.calculate_liquidation_threshold(&0, &8000);
     assert_eq!(threshold, 5000);
 }
@@ -443,7 +566,6 @@ fn test_liquidation_threshold_extreme_inputs_no_overflow() {
     let (env, contract_id, _admin, _borrower, _collateral_asset) = setup();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Verify u32::MAX handles safely and clamps to bounds
     let threshold = client.calculate_liquidation_threshold(&u32::MAX, &u32::MAX);
     assert!((5000..=9000).contains(&threshold));
 }
@@ -479,6 +601,32 @@ fn setup_with_multisig() -> (Env, Address, Address, Address, Address, Address, A
         signer1,
         signer2,
     )
+}
+
+fn create_request_struct(
+    env: &Env,
+    amount: i128,
+    duration_days: u32,
+    rate_bps: u32,
+    max_loan: i128,
+    collateral_asset: &Address,
+    collateral_amount: i128,
+    rate_model: InterestRateModel,
+) -> LoanRequestInput {
+    LoanRequestInput {
+        amount,
+        duration_days,
+        interest_rate_bps: rate_bps,
+        max_loan_amount: max_loan,
+        collateral_entries: vec![
+            env,
+            CollateralEntry {
+                asset: collateral_asset.clone(),
+                amount: collateral_amount,
+            },
+        ],
+        rate_model,
+    }
 }
 
 #[test]
@@ -525,7 +673,6 @@ fn test_duplicate_pause_signer_rejected() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Admin calls pause twice
     client.pause(&admin);
     client.pause(&admin);
 }
@@ -539,15 +686,13 @@ fn test_pause_activates_with_threshold() {
     assert!(!client.is_paused());
     assert_eq!(client.get_pause_signer_count(), 0);
 
-    // First signer (below threshold)
     client.pause(&admin);
     assert!(!client.is_paused());
     assert_eq!(client.get_pause_signer_count(), 1);
 
-    // Second signer reaches threshold (2) -> paused
     client.pause(&signer1);
     assert!(client.is_paused());
-    assert_eq!(client.get_pause_signer_count(), 0); // reset after activation
+    assert_eq!(client.get_pause_signer_count(), 0);
 }
 
 #[test]
@@ -557,20 +702,21 @@ fn test_create_loan_request_blocked_when_paused() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Pause with 2 signers
     client.pause(&admin);
     client.pause(&signer1);
 
     client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 1500,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            1500,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Fixed,
+        ),
     );
 }
 
@@ -581,20 +727,20 @@ fn test_approve_loan_blocked_when_paused() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Create a loan while unpaused
     let loan_id = client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 1500,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            1500,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Fixed,
+        ),
     );
 
-    // Pause
     client.pause(&admin);
     client.pause(&signer1);
 
@@ -609,27 +755,26 @@ fn test_mark_defaulted_blocked_when_paused() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Create + approve + activate a loan while unpaused
     let lender = Address::generate(&env);
     let loan_id = client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 1500,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            1500,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Fixed,
+        ),
     );
     client.approve_loan(&lender, &loan_id, &1);
     client.activate_loan(&admin, &loan_id);
 
-    // Pause
     client.pause(&admin);
     client.pause(&signer1);
 
-    // Try to mark defaulted
     client.mark_defaulted(&admin, &loan_id);
 }
 
@@ -642,23 +787,23 @@ fn test_record_payment_allowed_when_paused() {
     let lender = Address::generate(&env);
     let loan_id = client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 1500,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            1500,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Fixed,
+        ),
     );
     client.approve_loan(&lender, &loan_id, &1);
     client.activate_loan(&admin, &loan_id);
 
-    // Pause
     client.pause(&admin);
     client.pause(&signer1);
 
-    // Repayments should still work
     let status = client.record_payment(&admin, &loan_id, &500_0000000);
     assert_eq!(status, LoanStatus::Active);
 }
@@ -679,14 +824,12 @@ fn test_unpause_deactivates_with_threshold() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Pause first
     client.pause(&admin);
     client.pause(&signer1);
     assert!(client.is_paused());
 
-    // Unpause with 2 signers
     client.unpause(&admin);
-    assert!(client.is_paused()); // still paused (1 < threshold 2)
+    assert!(client.is_paused());
     client.unpause(&signer1);
     assert!(!client.is_paused());
 }
@@ -698,11 +841,9 @@ fn test_duplicate_unpause_signer_rejected() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Pause first
     client.pause(&admin);
     client.pause(&signer1);
 
-    // Try to unpause with same signer twice
     client.unpause(&admin);
     client.unpause(&admin);
 }
@@ -730,7 +871,6 @@ fn test_pause_without_multisig_rejected() {
     let admin = Address::generate(&env);
     client.initialize(&admin);
 
-    // No setup_multisig called
     client.pause(&admin);
 }
 
@@ -740,27 +880,26 @@ fn test_resume_operations_after_unpause() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Pause
     client.pause(&admin);
     client.pause(&signer1);
     assert!(client.is_paused());
 
-    // Unpause
     client.unpause(&admin);
     client.unpause(&signer2);
     assert!(!client.is_paused());
 
-    // Create a loan again — should work
     let loan_id = client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 1500,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            1500,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Fixed,
+        ),
     );
     assert_eq!(loan_id, 1);
 }
@@ -771,12 +910,10 @@ fn test_multisig_admin_can_still_use_admin_functions_when_paused() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Pause
     client.pause(&admin);
     client.pause(&signer1);
     assert!(client.is_paused());
 
-    // Admin should still be able to whitelist assets
     let new_asset = Address::generate(&env);
     client.whitelist_asset(&admin, &new_asset);
     assert!(client.is_asset_whitelisted(&new_asset));
@@ -788,11 +925,9 @@ fn test_pause_unpause_events_emitted() {
         setup_with_multisig();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Pause
     client.pause(&admin);
     client.pause(&signer1);
 
-    // One "paused" event is emitted when the threshold is met
     let events = env.events().all();
     assert!(!events.is_empty());
 }
@@ -801,7 +936,7 @@ fn test_pause_unpause_events_emitted() {
 
 /// Helper: creates and activates a loan, returning its ID.
 fn create_and_activate_loan(
-    _env: &Env,
+    env: &Env,
     client: &LendingContractClient,
     admin: &Address,
     borrower: &Address,
@@ -815,26 +950,20 @@ fn create_and_activate_loan(
 
     let loan_id = client.create_loan_request(
         borrower,
-        &LoanRequestInput {
-            amount: principal,
-            duration_days: days,
-            interest_rate_bps: rate_bps,
-            max_loan_amount: max_loan,
-            collateral_asset: collateral_asset.clone(),
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            env,
+            principal,
+            days,
+            rate_bps,
+            max_loan,
+            collateral_asset,
+            100_000_0000000,
+            rate_model.clone(),
+        ),
     );
 
-    // Approve (lender = admin for simplicity)
     client.approve_loan(admin, &loan_id, &1);
-    // Activate
     client.activate_loan(admin, &loan_id);
-
-    // New loans always start on the Fixed model (see `create_loan_request`);
-    // switch once more here if the caller wants to start on Floating instead.
-    if *rate_model == InterestRateModel::Floating {
-        client.switch_rate_model(borrower, &loan_id);
-    }
     loan_id
 }
 
@@ -846,43 +975,41 @@ fn test_create_loan_with_fixed_rate_model() {
 
     let loan_id = client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 1000,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            1000,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Fixed,
+        ),
     );
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.rate_model, InterestRateModel::Fixed);
     assert_eq!(loan.base_rate_bps, 1000);
 }
 
-/// Creating a loan then switching once reaches the Floating model, and the
-/// original request rate is preserved as `base_rate_bps`.
+/// Creating a Floating-rate loan stores the model correctly.
 #[test]
 fn test_create_loan_with_floating_rate_model() {
-    let (env, contract_id, admin, borrower, collateral_asset) = setup();
+    let (env, contract_id, _admin, borrower, collateral_asset) = setup();
     let client = LendingContractClient::new(&env, &contract_id);
 
     let loan_id = client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 500,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            500,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Floating,
+        ),
     );
-    // New loans always start Fixed; switching requires an ACTIVE loan.
-    client.approve_loan(&admin, &loan_id, &1);
-    client.activate_loan(&admin, &loan_id);
-    client.switch_rate_model(&borrower, &loan_id);
-
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.rate_model, InterestRateModel::Floating);
     assert_eq!(loan.base_rate_bps, 500);
@@ -905,12 +1032,10 @@ fn test_switch_rate_model_fixed_to_floating() {
     let loan_before = client.get_loan(&loan_id);
     assert_eq!(loan_before.rate_model, InterestRateModel::Fixed);
 
-    // Switch Fixed -> Floating
     client.switch_rate_model(&borrower, &loan_id);
     let loan_after = client.get_loan(&loan_id);
     assert_eq!(loan_after.rate_model, InterestRateModel::Floating);
 
-    // Fee was charged: 0.5% of remaining_due
     let expected_fee = loan_before.remaining_due * 50 / 10_000;
     assert_eq!(
         loan_after.remaining_due,
@@ -925,7 +1050,6 @@ fn test_switch_rate_model_cooldown_enforced() {
     let (env, contract_id, admin, borrower, collateral_asset) = setup();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Seed timestamp so `last_switch` doesn't record as 0 (the 'never switched' sentinel)
     env.ledger().set_timestamp(1_000_000_000);
 
     let loan_id = create_and_activate_loan(
@@ -937,11 +1061,9 @@ fn test_switch_rate_model_cooldown_enforced() {
         &InterestRateModel::Fixed,
     );
 
-    // First switch should succeed
     client.switch_rate_model(&borrower, &loan_id);
 
-    // Second switch within 24h should fail
-    env.ledger().set_timestamp(env.ledger().timestamp() + 3600); // +1 hour
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3600);
     client.switch_rate_model(&borrower, &loan_id);
 }
 
@@ -962,16 +1084,13 @@ fn test_switch_rate_model_allowed_after_cooldown() {
         &InterestRateModel::Fixed,
     );
 
-    // First switch
     client.switch_rate_model(&borrower, &loan_id);
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.rate_model, InterestRateModel::Floating);
 
-    // Advance time past cooldown
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 86_401);
 
-    // Second switch should succeed
     client.switch_rate_model(&borrower, &loan_id);
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.rate_model, InterestRateModel::Fixed);
@@ -1004,17 +1123,18 @@ fn test_switch_rate_model_only_active() {
     let (env, contract_id, _admin, borrower, collateral_asset) = setup();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Create but don't activate
     let loan_id = client.create_loan_request(
         &borrower,
-        &LoanRequestInput {
-            amount: 1_000_0000000,
-            duration_days: 30,
-            interest_rate_bps: 1000,
-            max_loan_amount: 100_000_0000000,
-            collateral_asset,
-            collateral_amount: 100_000_0000000,
-        },
+        &create_request_struct(
+            &env,
+            1_000_0000000,
+            30,
+            1000,
+            100_000_0000000,
+            &collateral_asset,
+            100_000_0000000,
+            InterestRateModel::Fixed,
+        ),
     );
     client.switch_rate_model(&borrower, &loan_id);
 }
@@ -1036,12 +1156,9 @@ fn test_update_floating_rate() {
     let loan_before = client.get_loan(&loan_id);
     assert_eq!(loan_before.interest_rate_bps, 1000);
 
-    // Update to a higher rate
     client.update_floating_rate(&admin, &loan_id, &2000);
     let loan_after = client.get_loan(&loan_id);
     assert_eq!(loan_after.interest_rate_bps, 2000);
-    // With a higher rate, total_due should be different from original
-    // (exact value depends on remaining days)
 }
 
 /// update_floating_rate panics on a Fixed-rate loan.
@@ -1063,9 +1180,6 @@ fn test_update_floating_rate_rejects_fixed() {
 }
 
 // ─── Flash Loan Receiver Contracts ────────────────────────────────────────────
-// Each receiver lives in its own module to avoid Soroban symbol collision
-// (two `#[contractimpl] impl FlashLoanReceiver for X` blocks in the same
-// module would generate colliding symbols).
 
 mod good_receiver {
     use super::*;
@@ -1186,12 +1300,11 @@ fn setup_flash_loan() -> (Env, Address, Address, Address, Address) {
     let collateral_asset = Address::generate(&env);
     client.whitelist_asset(&admin, &collateral_asset);
 
-    // Create a real SEP-41 test token and fund the pool
     let token_admin = Address::generate(&env);
     let token_address = env
         .register_stellar_asset_contract_v2(token_admin.clone())
         .address();
-    let pool_funding: i128 = 1_000_000_0000000; // 100 000 XLM
+    let pool_funding: i128 = 1_000_000_0000000;
     let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
     token_admin_client.mint(&contract_id, &pool_funding);
 
@@ -1203,35 +1316,24 @@ fn mint_tokens(env: &Env, token: &Address, recipient: &Address, amount: i128) {
     token_admin_client.mint(recipient, &amount);
 }
 
-// ─── Flash Loan Tests ─────────────────────────────────────────────────────────
-
-/// Default flash-loan fee in basis points (0.09 %).
 const DEFAULT_FLASH_LOAN_FEE_BPS: i128 = 9;
 
-/// Happy path: receiver repays exactly amount + fee, pool gains the fee.
 #[test]
 fn test_flash_loan_success_full_repayment() {
     let (env, contract_id, _admin, _borrower, token_address) = setup_flash_loan();
     let client = LendingContractClient::new(&env, &contract_id);
 
     let receiver_id = env.register(good_receiver::GoodReceiver, ());
-    let loan_amount: i128 = 1_000_0000000; // 1 000 XLM
+    let loan_amount: i128 = 1_000_0000000;
     let fee = loan_amount * DEFAULT_FLASH_LOAN_FEE_BPS / 10_000;
-    // Receiver needs `fee` tokens of its own to complete repayment
     mint_tokens(&env, &token_address, &receiver_id, fee);
 
     let pool_before = token::Client::new(&env, &token_address).balance(&contract_id);
-    client.flash_loan(
-        &receiver_id,
-        &token_address,
-        &loan_amount,
-        &Bytes::new(&env),
-    );
+    client.flash_loan(&receiver_id, &token_address, &loan_amount, &Bytes::new(&env));
     let pool_after = token::Client::new(&env, &token_address).balance(&contract_id);
     assert_eq!(pool_after, pool_before + fee);
 }
 
-/// Receiver repays more than required; the `>=` check passes and surplus accrues.
 #[test]
 fn test_flash_loan_accepts_overpayment() {
     let (env, contract_id, _admin, _borrower, token_address) = setup_flash_loan();
@@ -1240,46 +1342,32 @@ fn test_flash_loan_accepts_overpayment() {
     let receiver_id = env.register(generous_receiver::GenerousReceiver, ());
     let loan_amount: i128 = 1_000_0000000;
     let fee = loan_amount * DEFAULT_FLASH_LOAN_FEE_BPS / 10_000;
-    // GenerousReceiver repays fee + 100 extra, so it needs that much
     mint_tokens(&env, &token_address, &receiver_id, fee + 100);
 
     let pool_before = token::Client::new(&env, &token_address).balance(&contract_id);
-    client.flash_loan(
-        &receiver_id,
-        &token_address,
-        &loan_amount,
-        &Bytes::new(&env),
-    );
+    client.flash_loan(&receiver_id, &token_address, &loan_amount, &Bytes::new(&env));
     let pool_after = token::Client::new(&env, &token_address).balance(&contract_id);
     assert_eq!(pool_after, pool_before + fee + 100);
 }
 
-/// Admin adjusts the flash-loan fee; the new rate is applied correctly.
 #[test]
 fn test_flash_loan_applies_custom_fee_bps() {
     let (env, contract_id, admin, _borrower, token_address) = setup_flash_loan();
     let client = LendingContractClient::new(&env, &contract_id);
 
-    // Set fee to 50 bps (0.50 %)
     client.set_flash_loan_fee_bps(&admin, &50);
 
     let receiver_id = env.register(good_receiver::GoodReceiver, ());
-    let loan_amount: i128 = 10_000_0000000; // 1 000 XLM
+    let loan_amount: i128 = 10_000_0000000;
     let expected_fee = loan_amount * 50 / 10_000;
     mint_tokens(&env, &token_address, &receiver_id, expected_fee);
 
     let pool_before = token::Client::new(&env, &token_address).balance(&contract_id);
-    client.flash_loan(
-        &receiver_id,
-        &token_address,
-        &loan_amount,
-        &Bytes::new(&env),
-    );
+    client.flash_loan(&receiver_id, &token_address, &loan_amount, &Bytes::new(&env));
     let pool_after = token::Client::new(&env, &token_address).balance(&contract_id);
     assert_eq!(pool_after, pool_before + expected_fee);
 }
 
-/// Receiver repays nothing; the whole transaction panics.
 #[test]
 #[should_panic(expected = "Flash loan not repaid")]
 fn test_flash_loan_reverts_when_receiver_repays_nothing() {
@@ -1287,17 +1375,9 @@ fn test_flash_loan_reverts_when_receiver_repays_nothing() {
     let client = LendingContractClient::new(&env, &contract_id);
 
     let receiver_id = env.register(stingy_receiver::StingyReceiver, ());
-    let loan_amount: i128 = 1_000_0000000;
-
-    client.flash_loan(
-        &receiver_id,
-        &token_address,
-        &loan_amount,
-        &Bytes::new(&env),
-    );
+    client.flash_loan(&receiver_id, &token_address, &1_000_0000000, &Bytes::new(&env));
 }
 
-/// Receiver repays only principal (not fee); the balance check catches it.
 #[test]
 #[should_panic(expected = "Flash loan not repaid")]
 fn test_flash_loan_reverts_on_partial_repayment() {
@@ -1305,67 +1385,45 @@ fn test_flash_loan_reverts_on_partial_repayment() {
     let client = LendingContractClient::new(&env, &contract_id);
 
     let receiver_id = env.register(partial_receiver::PartialReceiver, ());
-    let loan_amount: i128 = 1_000_0000000;
-
-    client.flash_loan(
-        &receiver_id,
-        &token_address,
-        &loan_amount,
-        &Bytes::new(&env),
-    );
+    client.flash_loan(&receiver_id, &token_address, &1_000_0000000, &Bytes::new(&env));
 }
 
-/// A failed flash loan is atomic: the pool's balance is exactly what it was before.
 #[test]
 fn test_failed_flash_loan_rolls_back_pool_balance() {
     let (env, contract_id, _admin, _borrower, token_address) = setup_flash_loan();
     let client = LendingContractClient::new(&env, &contract_id);
 
     let receiver_id = env.register(stingy_receiver::StingyReceiver, ());
-    let loan_amount: i128 = 1_000_0000000;
-
     let pool_before = token::Client::new(&env, &token_address).balance(&contract_id);
 
-    let result = client.try_flash_loan(
-        &receiver_id,
-        &token_address,
-        &loan_amount,
-        &Bytes::new(&env),
-    );
+    let result =
+        client.try_flash_loan(&receiver_id, &token_address, &1_000_0000000, &Bytes::new(&env));
     assert!(result.is_err(), "flash_loan should have panicked");
 
     let pool_after = token::Client::new(&env, &token_address).balance(&contract_id);
-    assert_eq!(
-        pool_before, pool_after,
-        "Pool balance must be unchanged after a failed flash loan"
-    );
+    assert_eq!(pool_before, pool_after);
 }
 
-/// The pool remains usable for the next borrower after a failed flash loan.
 #[test]
 fn test_pool_usable_again_immediately_after_a_failed_flash_loan() {
     let (env, contract_id, _admin, _borrower, token_address) = setup_flash_loan();
     let client = LendingContractClient::new(&env, &contract_id);
 
     let stingy_id = env.register(stingy_receiver::StingyReceiver, ());
-    let loan_amount: i128 = 1_000_0000000;
+    let result =
+        client.try_flash_loan(&stingy_id, &token_address, &1_000_0000000, &Bytes::new(&env));
+    assert!(result.is_err());
 
-    // First attempt fails (stingy receiver repays nothing)
-    let result = client.try_flash_loan(&stingy_id, &token_address, &loan_amount, &Bytes::new(&env));
-    assert!(result.is_err(), "flash_loan should have panicked");
-
-    // Second attempt with a GoodReceiver must succeed
     let good_id = env.register(good_receiver::GoodReceiver, ());
-    let fee = loan_amount * DEFAULT_FLASH_LOAN_FEE_BPS / 10_000;
+    let fee = 1_000_0000000 * DEFAULT_FLASH_LOAN_FEE_BPS / 10_000;
     mint_tokens(&env, &token_address, &good_id, fee);
 
     let pool_before = token::Client::new(&env, &token_address).balance(&contract_id);
-    client.flash_loan(&good_id, &token_address, &loan_amount, &Bytes::new(&env));
+    client.flash_loan(&good_id, &token_address, &1_000_0000000, &Bytes::new(&env));
     let pool_after = token::Client::new(&env, &token_address).balance(&contract_id);
     assert_eq!(pool_after, pool_before + fee);
 }
 
-/// Cannot borrow more than the pool holds.
 #[test]
 #[should_panic(expected = "Insufficient pool liquidity for flash loan")]
 fn test_flash_loan_rejects_amount_over_pool_liquidity() {
@@ -1375,7 +1433,6 @@ fn test_flash_loan_rejects_amount_over_pool_liquidity() {
     let receiver_id = env.register(good_receiver::GoodReceiver, ());
     let pool_balance = token::Client::new(&env, &token_address).balance(&contract_id);
 
-    // Try to borrow more than the pool has
     client.flash_loan(
         &receiver_id,
         &token_address,
@@ -1384,7 +1441,6 @@ fn test_flash_loan_rejects_amount_over_pool_liquidity() {
     );
 }
 
-/// Zero amount is rejected.
 #[test]
 #[should_panic(expected = "Flash loan amount must be positive")]
 fn test_flash_loan_rejects_zero_amount() {
@@ -1395,7 +1451,6 @@ fn test_flash_loan_rejects_zero_amount() {
     client.flash_loan(&receiver_id, &token_address, &0, &Bytes::new(&env));
 }
 
-/// Negative amount is rejected.
 #[test]
 #[should_panic(expected = "Flash loan amount must be positive")]
 fn test_flash_loan_rejects_negative_amount() {
@@ -1406,7 +1461,6 @@ fn test_flash_loan_rejects_negative_amount() {
     client.flash_loan(&receiver_id, &token_address, &(-1), &Bytes::new(&env));
 }
 
-/// Only multisig admin can change the flash-loan fee.
 #[test]
 #[should_panic(expected = "Unauthorised")]
 fn test_only_admin_can_change_flash_loan_fee() {
@@ -1417,7 +1471,6 @@ fn test_only_admin_can_change_flash_loan_fee() {
     client.set_flash_loan_fee_bps(&random, &50);
 }
 
-/// Fee cannot exceed MAX_FLASH_LOAN_FEE_BPS (500 bps = 5 %).
 #[test]
 #[should_panic(expected = "Fee exceeds MAX_FLASH_LOAN_FEE_BPS")]
 fn test_flash_loan_fee_capped() {
@@ -1427,7 +1480,6 @@ fn test_flash_loan_fee_capped() {
     client.set_flash_loan_fee_bps(&admin, &501);
 }
 
-/// Fee set to exactly MAX_FLASH_LOAN_FEE_BPS (500 bps) is accepted.
 #[test]
 fn test_flash_loan_fee_at_max_boundary_accepted() {
     let (env, contract_id, admin, _borrower, token_address) = setup_flash_loan();
@@ -1442,12 +1494,555 @@ fn test_flash_loan_fee_at_max_boundary_accepted() {
     mint_tokens(&env, &token_address, &receiver_id, expected_fee);
 
     let pool_before = token::Client::new(&env, &token_address).balance(&contract_id);
-    client.flash_loan(
-        &receiver_id,
-        &token_address,
-        &loan_amount,
-        &Bytes::new(&env),
-    );
+    client.flash_loan(&receiver_id, &token_address, &loan_amount, &Bytes::new(&env));
     let pool_after = token::Client::new(&env, &token_address).balance(&contract_id);
     assert_eq!(pool_after, pool_before + expected_fee);
 }
+
+// ─── Multi-Asset Collateral Vault Tests ───────────────────────────────────────
+
+fn setup_multi_collateral() -> (Env, Address, Address, Address, Address, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LendingContract, ());
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let borrower = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.set_multisig_admin(&admin, &admin);
+
+    let asset_a = Address::generate(&env);
+    let asset_b = Address::generate(&env);
+    client.whitelist_asset(&admin, &asset_a);
+    client.whitelist_asset(&admin, &asset_b);
+
+    (env, contract_id, admin, borrower, asset_a, asset_b)
+}
+
+/// Deposit a single collateral asset succeeds.
+#[test]
+fn test_deposit_collateral_single_asset() {
+    let (env, contract_id, _admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+
+    let entries = client.get_user_collateral_entries(&borrower);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().asset, asset_a);
+    assert_eq!(entries.get(0).unwrap().amount, 1_000_0000000);
+}
+
+/// Deposit multiple different collateral assets succeeds.
+#[test]
+fn test_deposit_collateral_multiple_assets() {
+    let (env, contract_id, _admin, borrower, asset_a, asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &5_000_0000000);
+    client.deposit_collateral(&borrower, &asset_b, &3_000_0000000);
+
+    let entries = client.get_user_collateral_entries(&borrower);
+    assert_eq!(entries.len(), 2);
+
+    let entry_a = entries.get(0).unwrap();
+    let entry_b = entries.get(1).unwrap();
+    assert_eq!(entry_a.asset, asset_a);
+    assert_eq!(entry_a.amount, 5_000_0000000);
+    assert_eq!(entry_b.asset, asset_b);
+    assert_eq!(entry_b.amount, 3_000_0000000);
+}
+
+/// Depositing the same asset twice accumulates the amount.
+#[test]
+fn test_deposit_collateral_same_asset_accumulates() {
+    let (env, contract_id, _admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+    client.deposit_collateral(&borrower, &asset_a, &2_000_0000000);
+
+    let entries = client.get_user_collateral_entries(&borrower);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().amount, 3_000_0000000);
+}
+
+/// Deposit of zero amount is rejected.
+#[test]
+#[should_panic(expected = "Collateral amount must be positive")]
+fn test_deposit_collateral_zero_amount_rejected() {
+    let (env, contract_id, _admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &0);
+}
+
+/// Deposit to a non-whitelisted asset is rejected.
+#[test]
+#[should_panic(expected = "Asset is not whitelisted")]
+fn test_deposit_collateral_non_whitelisted_asset_rejected() {
+    let (env, contract_id, _admin, borrower, _asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let random_asset = Address::generate(&env);
+    client.deposit_collateral(&borrower, &random_asset, &1_000_0000000);
+}
+
+/// Withdraw collateral from a single asset reduces balance.
+#[test]
+fn test_withdraw_collateral_basic() {
+    let (env, contract_id, _admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &5_000_0000000);
+    client.withdraw_collateral(&borrower, &asset_a, &2_000_0000000);
+
+    let entries = client.get_user_collateral_entries(&borrower);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().amount, 3_000_0000000);
+}
+
+/// Withdrawing the full amount removes the entry entirely.
+#[test]
+fn test_withdraw_collateral_full_amount_removes_entry() {
+    let (env, contract_id, _admin, borrower, asset_a, asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &5_000_0000000);
+    client.deposit_collateral(&borrower, &asset_b, &3_000_0000000);
+
+    // Withdraw all of asset_a
+    client.withdraw_collateral(&borrower, &asset_a, &5_000_0000000);
+
+    let entries = client.get_user_collateral_entries(&borrower);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().asset, asset_b);
+}
+
+/// Withdrawing more than the balance is rejected.
+#[test]
+#[should_panic(expected = "Insufficient collateral balance for withdrawal")]
+fn test_withdraw_collateral_exceeds_balance_rejected() {
+    let (env, contract_id, _admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+    client.withdraw_collateral(&borrower, &asset_a, &2_000_0000000);
+}
+
+/// Withdrawing zero amount is rejected.
+#[test]
+#[should_panic(expected = "Withdrawal amount must be positive")]
+fn test_withdraw_collateral_zero_amount_rejected() {
+    let (env, contract_id, _admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+    client.withdraw_collateral(&borrower, &asset_a, &0);
+}
+
+/// Withdrawing an asset that was never deposited is rejected.
+#[test]
+#[should_panic(expected = "No collateral of the specified asset found")]
+fn test_withdraw_collateral_nonexistent_asset_rejected() {
+    let (env, contract_id, _admin, borrower, asset_a, asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+    client.withdraw_collateral(&borrower, &asset_b, &500_0000000);
+}
+
+/// Deposit is blocked when contract is paused.
+/// Uses try_ to catch the HostError (panic message is in diagnostic event).
+#[test]
+fn test_deposit_collateral_blocked_when_paused() {
+    let (env, contract_id, admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    // Need at least 2 signers for threshold 2
+    let signer = Address::generate(&env);
+    let admins = vec![&env, admin.clone(), signer.clone()];
+    client.setup_multisig(&admin, &admins, &2);
+    client.pause(&admin);
+    client.pause(&signer);
+    assert!(client.is_paused());
+
+    let result = client.try_deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+    assert!(result.is_err(), "deposit_collateral should have failed when paused");
+}
+
+/// Get borrowing power with no active loans allows full withdrawal.
+#[test]
+fn test_withdraw_collateral_allowed_with_no_active_loans() {
+    let (env, contract_id, _admin, borrower, asset_a, asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &5_000_0000000);
+    client.deposit_collateral(&borrower, &asset_b, &3_000_0000000);
+
+    // Should be able to withdraw all
+    client.withdraw_collateral(&borrower, &asset_a, &5_000_0000000);
+
+    let entries = client.get_user_collateral_entries(&borrower);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().asset, asset_b);
+}
+
+/// Get user collateral entries for a borrower with no collateral returns empty Vec.
+#[test]
+fn test_get_user_collateral_entries_empty_for_new_borrower() {
+    let (env, contract_id, _admin, borrower, _asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let entries = client.get_user_collateral_entries(&borrower);
+    assert_eq!(entries.len(), 0);
+}
+
+/// Get total collateral value for a borrower with deposits.
+#[test]
+fn test_get_total_collateral_value() {
+    let (env, contract_id, _admin, borrower, asset_a, asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.deposit_collateral(&borrower, &asset_a, &10_000_0000000);
+    client.deposit_collateral(&borrower, &asset_b, &20_000_0000000);
+
+    let total_value = client.get_total_collateral_value(&borrower);
+    // Without oracle, each unit is valued at 1.0 base asset unit
+    // Total = 10_000_0000000 + 20_000_0000000 = 30_000_0000000
+    assert_eq!(total_value, 30_000_0000000);
+}
+
+/// Get total collateral value for a borrower with no deposits.
+#[test]
+fn test_get_total_collateral_value_empty() {
+    let (env, contract_id, _admin, borrower, _asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let total_value = client.get_total_collateral_value(&borrower);
+    assert_eq!(total_value, 0);
+}
+
+/// Borrowing power for a single asset with default (75%) collateral factor.
+#[test]
+fn test_get_borrowing_power_single_asset() {
+    let (env, contract_id, admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    // Set a specific collateral config: 80% LTV
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_a,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 8000, // 80% LTV
+            has_price_oracle: false,
+            volatility_bps: 500, // 5% vol
+        },
+    );
+
+    client.deposit_collateral(&borrower, &asset_a, &10_000_0000000);
+
+    let borrowing_power = client.get_borrowing_power(&borrower);
+    // 10_000_0000000 * 80% = 8_000_0000000
+    assert_eq!(borrowing_power, 8_000_0000000);
+}
+
+/// Borrowing power for multiple assets with different collateral factors.
+#[test]
+fn test_get_borrowing_power_multiple_assets() {
+    let (env, contract_id, admin, borrower, asset_a, asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    // Asset A: 75% LTV (default)
+    client.deposit_collateral(&borrower, &asset_a, &10_000_0000000);
+
+    // Asset B: 50% LTV
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_b,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 5000, // 50% LTV
+            has_price_oracle: false,
+            volatility_bps: 2000, // 20% vol
+        },
+    );
+    client.deposit_collateral(&borrower, &asset_b, &10_000_0000000);
+
+    let borrowing_power = client.get_borrowing_power(&borrower);
+    // Asset A: 10_000_0000000 * 75% = 7_500_0000000
+    // Asset B: 10_000_0000000 * 50% = 5_000_0000000
+    // Total: 12_500_0000000
+    assert_eq!(borrowing_power, 12_500_0000000);
+}
+
+/// Borrowing power with no deposited collateral.
+#[test]
+fn test_get_borrowing_power_no_collateral() {
+    let (env, contract_id, _admin, borrower, _asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let borrowing_power = client.get_borrowing_power(&borrower);
+    assert_eq!(borrowing_power, 0);
+}
+
+/// Setting asset collateral config validates the asset is whitelisted.
+#[test]
+#[should_panic(expected = "Asset is not whitelisted")]
+fn test_set_asset_collateral_config_non_whitelisted_rejected() {
+    let (env, contract_id, admin, _borrower, _asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let random_asset = Address::generate(&env);
+    client.set_asset_collateral_config(
+        &admin,
+        &random_asset,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 8000,
+            has_price_oracle: false,
+            volatility_bps: 500,
+        },
+    );
+}
+
+/// Setting asset collateral config clamps the collateral factor to bounds.
+#[test]
+fn test_set_asset_collateral_config_clamps_to_bounds() {
+    let (env, contract_id, admin, _borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    // Set factor above max (9600 > 9500)
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_a,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 9600, // Above MAX
+            has_price_oracle: false,
+            volatility_bps: 500,
+        },
+    );
+
+    let config = client.get_asset_collateral_config(&asset_a);
+    assert_eq!(config.collateral_factor_bps, 9500); // Clamped to MAX
+
+    // Set factor below min (500 < 1000)
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_a,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 500, // Below MIN
+            has_price_oracle: false,
+            volatility_bps: 500,
+        },
+    );
+
+    let config = client.get_asset_collateral_config(&asset_a);
+    assert_eq!(config.collateral_factor_bps, 1000); // Clamped to MIN
+}
+
+/// Get asset collateral config returns default for unconfigured asset.
+#[test]
+fn test_get_asset_collateral_config_default() {
+    let (env, contract_id, _admin, _borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let config = client.get_asset_collateral_config(&asset_a);
+    // Default: 75% LTV, no oracle, 0 volatility
+    assert_eq!(config.collateral_factor_bps, 7500);
+    assert_eq!(config.has_price_oracle, false);
+    assert_eq!(config.volatility_bps, 0);
+}
+
+/// Price oracle can be set and retrieved (multisig-gated).
+#[test]
+fn test_set_price_oracle() {
+    let (env, contract_id, admin, _borrower, _asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    client.set_price_oracle(&admin, &oracle);
+
+    let retrieved = client.get_price_oracle();
+    assert_eq!(retrieved, oracle);
+}
+
+/// Median aggregation ignores a manipulated outlier price sample.
+#[test]
+fn test_price_oracle_median_resists_manipulation() {
+    let (env, contract_id, admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_a,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 7500,
+            has_price_oracle: true,
+            volatility_bps: 0,
+        },
+    );
+
+    client.deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+
+    client.set_asset_oracle_prices(
+        &admin,
+        &asset_a,
+        &vec![
+            &env,
+            PRICE_PRECISION,
+            PRICE_PRECISION,
+            PRICE_PRECISION * 10,
+        ],
+    );
+
+    let value = client.get_total_collateral_value(&borrower);
+    assert_eq!(value, 1_000_0000000);
+}
+
+/// TWAP is used when live oracle samples are unavailable.
+#[test]
+fn test_price_oracle_twap_fallback_is_used() {
+    let (env, contract_id, admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_a,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 7500,
+            has_price_oracle: true,
+            volatility_bps: 0,
+        },
+    );
+
+    client.deposit_collateral(&borrower, &asset_a, &1_000_0000000);
+    client.set_asset_twap_price(&admin, &asset_a, &(PRICE_PRECISION * 2));
+
+    let value = client.get_total_collateral_value(&borrower);
+    assert_eq!(value, 2_000_0000000);
+}
+
+/// Only multisig admin can set the price oracle.
+#[test]
+#[should_panic(expected = "Unauthorised")]
+fn test_set_price_oracle_non_admin_rejected() {
+    let (env, contract_id, _admin, _borrower, _asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let random = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.set_price_oracle(&random, &oracle);
+}
+
+/// Only multisig admin can configure asset collateral config.
+#[test]
+#[should_panic(expected = "Unauthorised")]
+fn test_set_asset_collateral_config_non_admin_rejected() {
+    let (env, contract_id, _admin, _borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    let random = Address::generate(&env);
+    client.set_asset_collateral_config(
+        &random,
+        &asset_a,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 8000,
+            has_price_oracle: false,
+            volatility_bps: 500,
+        },
+    );
+}
+
+/// Borrowing power check is enforced during create_loan_request.
+#[test]
+fn test_create_loan_request_checks_borrowing_power() {
+    let (env, contract_id, admin, borrower, asset_a, _asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    // Configure with low LTV
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_a,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 1000, // 10% LTV
+            has_price_oracle: false,
+            volatility_bps: 500,
+        },
+    );
+
+    // Deposit collateral worth 10_000_0000000, borrowing power = 1_000_0000000
+    client.deposit_collateral(&borrower, &asset_a, &10_000_0000000);
+
+    // This should fail because we're trying to borrow more than borrowing power
+    let result = client.try_create_loan_request(
+        &borrower,
+        &LoanRequestInput {
+            amount: 5_000_0000000, // > 1_000_0000000 borrowing power
+            duration_days: 30,
+            interest_rate_bps: 1000,
+            max_loan_amount: 100_000_0000000,
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: asset_a.clone(),
+                    amount: 10_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
+    );
+    assert!(result.is_err(), "create_loan_request should have failed due to borrowing power");
+}
+
+/// Create loan request with multiple collateral assets.
+#[test]
+fn test_create_loan_request_with_multi_asset_collateral() {
+    let (env, contract_id, admin, borrower, asset_a, asset_b) = setup_multi_collateral();
+    let client = LendingContractClient::new(&env, &contract_id);
+
+    // Configure asset B with 50% LTV
+    client.set_asset_collateral_config(
+        &admin,
+        &asset_b,
+        &AssetCollateralConfig {
+            collateral_factor_bps: 5000, // 50% LTV
+            has_price_oracle: false,
+            volatility_bps: 1000,
+        },
+    );
+
+    // deposit_collateral on user's vault
+    client.deposit_collateral(&borrower, &asset_a, &10_000_0000000); // 7.5K borrowing power
+    client.deposit_collateral(&borrower, &asset_b, &10_000_0000000); // 5K borrowing power
+
+    // Total borrowing power = 12_500_0000000
+    // Requesting 10_000_0000000 should work
+    let loan_id = client.create_loan_request(
+        &borrower,
+        &LoanRequestInput {
+            amount: 10_000_0000000,
+            duration_days: 30,
+            interest_rate_bps: 1000,
+            max_loan_amount: 100_000_0000000,
+            collateral_entries: vec![
+                &env,
+                CollateralEntry {
+                    asset: asset_a.clone(),
+                    amount: 10_000_0000000,
+                },
+                CollateralEntry {
+                    asset: asset_b.clone(),
+                    amount: 10_000_0000000,
+                },
+            ],
+            rate_model: InterestRateModel::Fixed,
+        },
+    );
+
+    let loan = client.get_loan(&loan_id);
+    assert_eq!(loan.status, LoanStatus::Pending);
+}
+
+

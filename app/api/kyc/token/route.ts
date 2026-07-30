@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuthenticatedUser } from "@/lib/auth/session";
+import { enforceRouteRateLimit } from "@/lib/rate-limit";
 import { getServerSupabaseClient, getServiceRoleClient } from "@/lib/supabase/server";
 import { createApplicant, getApplicantId, generateSdkToken } from "@/lib/kyc/provider";
 import { isRedirectError } from "next/dist/client/components/redirect-error";
@@ -17,8 +18,12 @@ import { isRedirectError } from "next/dist/client/components/redirect-error";
  *  4. Generate a short-lived SDK token
  *  5. Return { applicantId, token, expiresAt } to the browser
  */
-export async function POST(_request: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
+    // ── 0. Rate limit ────────────────────────────────────────────────────────
+    const rateLimited = await enforceRouteRateLimit(request);
+    if (rateLimited) return rateLimited;
+
     // ── 1. Auth ──────────────────────────────────────────────────────────────
     const { user } = await requireAuthenticatedUser("borrower");
 
@@ -80,8 +85,12 @@ export async function POST(_request: NextRequest) {
 /**
  * GET /api/kyc/token — return current KYC status for the authenticated user
  */
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
+    // ── 0. Rate limit ────────────────────────────────────────────────────────
+    const rateLimited = await enforceRouteRateLimit(request);
+    if (rateLimited) return rateLimited;
+
     const { user } = await requireAuthenticatedUser();
     const supabase = await getServerSupabaseClient();
     if (!supabase) {

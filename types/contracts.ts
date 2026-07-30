@@ -99,6 +99,22 @@ export interface EscrowHold {
   status: EscrowStatus;
 }
 
+// ── Pooled Lending / JumpRateModel ────────────────────────────────────────────
+
+export interface PoolConfig {
+  baseRateBps: number;
+  multiplierPerSlopeBps: number;
+  jumpMultiplierBps: number;
+  kinkBps: number;
+  reserveFactorBps: number;
+}
+
+export interface PoolData {
+  totalSupply: bigint;
+  totalBorrows: bigint;
+  totalReserves: bigint;
+}
+
 // ── Interest Rate Model ───────────────────────────────────────────────────────
 
 /** Whether a loan uses a fixed or floating interest rate. */
@@ -110,6 +126,53 @@ export const RATE_SWITCH_FEE_BPS = 50;
 /** Cooldown between rate model switches in seconds (24 hours). */
 export const RATE_SWITCH_COOLDOWN_SECS = 86_400;
 
+// ── Multi-Asset Collateral Vault ─────────────────────────────────────────────
+
+/** A single collateral entry: asset address + amount in that asset's smallest unit. */
+export interface CollateralEntry {
+  asset: string;
+  amount: bigint;
+}
+
+/** Per-asset collateral configuration (mirrors the contract). */
+export interface AssetCollateralConfig {
+  /** LTV ratio in basis-points (e.g. 8000 = 80%). */
+  collateralFactorBps: number;
+  /** Whether the asset has an oracle price feed configured. */
+  hasPriceOracle: boolean;
+  /** Estimated annualized volatility in basis-points. */
+  volatilityBps: number;
+}
+
+/** Default collateral factor for assets without explicit config: 75% LTV. */
+export const DEFAULT_COLLATERAL_FACTOR_BPS = 7500;
+/** Maximum allowed collateral factor: 95% LTV. */
+export const MAX_COLLATERAL_FACTOR_BPS = 9500;
+/** Minimum allowed collateral factor: 10% LTV. */
+export const MIN_COLLATERAL_FACTOR_BPS = 1000;
+
+/**
+ * Calculate borrowing power from a set of collateral entries.
+ * borrowing_power = sum(amount * collateralFactorBps / 10000)
+ */
+export function calculateBorrowingPower(
+  entries: { amount: bigint; config: AssetCollateralConfig }[]
+): bigint {
+  let total = 0n;
+  for (const { amount, config } of entries) {
+    total += (amount * BigInt(config.collateralFactorBps)) / 10_000n;
+  }
+  return total;
+}
+
+/**
+ * Static helper to compute total collateral value from entries.
+ * Without oracle prices, each unit is valued at face value.
+ */
+export function calculateTotalCollateralValue(entries: CollateralEntry[]): bigint {
+  return entries.reduce((sum, e) => sum + e.amount, 0n);
+}
+
 // ── Lending ───────────────────────────────────────────────────────────────────
 
 export type LoanStatus =
@@ -119,6 +182,18 @@ export type LoanStatus =
   | "Repaid"
   | "Defaulted"
   | "Cancelled";
+
+/** Input struct for creating a loan request (mirrors Rust LoanRequestInput). */
+export interface LoanRequestInput {
+  amount: bigint;
+  durationDays: number;
+  interestRateBps: number;
+  maxLoanAmount: bigint;
+  /** Multi-asset collateral entries supporting this loan. */
+  collateralEntries: CollateralEntry[];
+  /** Interest rate model: Fixed or Floating */
+  rateModel: InterestRateModel;
+}
 
 export interface LoanRecord {
   id: number;
@@ -139,11 +214,7 @@ export interface LoanRecord {
   escrowId: number;
   /** 1 % of interest, in stroops */
   platformFee: bigint;
-  /** Collateral asset address */
-  collateralAsset: string;
-  /** Collateral amount in asset's smallest unit */
-  collateralAmount: bigint;
-  /** Interest rate model: Fixed or Floating (defaults to Fixed for backward compat) */
+  /** Interest rate model: Fixed or Floating */
   rateModel: InterestRateModel;
   /** Baseline rate at loan creation in bps (anchors floating calculations) */
   baseRateBps: number;

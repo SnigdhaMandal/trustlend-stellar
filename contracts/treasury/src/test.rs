@@ -158,8 +158,11 @@ fn test_collect_protocol_fees_from_lending() {
             duration_days: 30u32,
             interest_rate_bps: 1000u32,
             max_loan_amount: 100_000_0000000i128,
-            collateral_asset,
-            collateral_amount: 100_000_0000000i128,
+            collateral_entries: soroban_sdk::vec![
+                &env,
+                lending::CollateralEntry { asset: collateral_asset, amount: 100_000_0000000i128 },
+            ],
+            rate_model: lending::InterestRateModel::Fixed,
         },
     );
 

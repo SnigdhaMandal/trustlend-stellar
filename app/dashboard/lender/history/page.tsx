@@ -3,32 +3,38 @@ import { requireAuthenticatedUser } from "@/lib/auth/session";
 import { getLenderDashboardMetrics, presentLenderMetrics } from "@/lib/dashboard/metrics";
 import { getServerSupabaseClient, getServiceRoleClient } from "@/lib/supabase/server";
 import { lenderNavLinks } from "@/lib/dashboard/lender-links";
-import { buildStellarTxVerificationUrl, isLikelyTxHash } from "@/lib/stellar/explorer";
 import { ExportCsvButton } from "@/components/dashboard/ExportCsvButton";
+import { LenderHistoryClient } from "./client";
 
 export default async function LenderHistoryPage() {
-  const { user }  = await requireAuthenticatedUser("lender");
-  const metrics   = await getLenderDashboardMetrics(user.id);
-  const supabase  = await getServerSupabaseClient();
-  const srClient  = getServiceRoleClient();
+  const { user } = await requireAuthenticatedUser("lender");
+  const metrics = await getLenderDashboardMetrics(user.id);
+  const supabase = await getServerSupabaseClient();
+  const srClient = getServiceRoleClient();
 
   // Profile data
-  const { data: profile } = supabase 
+  const { data: profile } = supabase
     ? await supabase.from("profiles").select("full_name").eq("id", user.id).maybeSingle()
     : { data: null };
 
-  // Fetch all transactions this lender initiated
-  const { data: userTxs } = supabase
-    ? await supabase
+  // Fetch initial transactions with limit for server-side rendering
+  const PAGE_SIZE = 20;
+
+  let userTxsQuery = supabase
+    ? supabase
         .from("ledger_transactions")
         .select("id, category, ref_type, ref_id, amount, currency, status, metadata, created_at")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
-        .limit(100)
+        .limit(PAGE_SIZE + 1)
     : { data: [] };
 
-  // Fetch incoming payments (repayments to this lender, where the borrower initiated it)
-  // We use the Service Role Client to bypass borrower-owned table RLS
+  const { data: userTxs } = userTxsQuery;
+
+  const hasMore = (userTxs?.length ?? 0) > PAGE_SIZE;
+  const items = userTxs?.slice(0, PAGE_SIZE) ?? [];
+
+  // Fetch incoming repayments
   const { data: allRepays } = srClient
     ? await srClient
         .from("ledger_transactions")
@@ -38,30 +44,31 @@ export default async function LenderHistoryPage() {
         .limit(200)
     : { data: [] };
 
-  const incomingRepays = (allRepays ?? []).filter(tx => {
-     try {
-       const meta = JSON.parse(String(tx.metadata || "{}"));
-       return String(meta.lenderUserId) === String(user.id) || String(meta.lenderAddress) === String(user.id);
-     } catch { return false; }
+  const incomingRepays = (allRepays ?? []).filter((tx) => {
+    try {
+      const meta = JSON.parse(String(tx.metadata || "{}"));
+      return String(meta.lenderUserId) === String(user.id) || String(meta.lenderAddress) === String(user.id);
+    } catch { return false; }
   });
 
-  // Merge, dedup, sort
+  // Merge and dedup
   const txMap = new Map();
-  for (const t of (userTxs ?? [])) txMap.set(t.id, t);
+  for (const t of items) txMap.set(t.id, t);
   for (const t of incomingRepays) txMap.set(t.id, t);
 
-  const transactions = Array.from(txMap.values()).sort((a, b) => 
-    new Date(String(b.created_at)).getTime() - new Date(String(a.created_at)).getTime()
+  const transactions = Array.from(txMap.values()).sort(
+    (a, b) => new Date(String(b.created_at)).getTime() - new Date(String(a.created_at)).getTime()
   );
 
-  const exportData = transactions.map(tx => {
+  // Format transactions
+  const initialTransactions = transactions.map((tx) => {
     let txHash = "";
     let subLabel = "";
     try {
       const meta = JSON.parse(String(tx.metadata ?? "{}"));
       txHash = String(meta.txHash ?? "");
-      if (meta.loanId) subLabel = `Loan #${String(meta.loanId).slice(0,8)}`;
-      else if (tx.ref_id) subLabel = `Ref #${String(tx.ref_id).slice(0,8)}`;
+      if (meta.loanId) subLabel = `Loan #${String(meta.loanId).slice(0, 8)}`;
+      else if (tx.ref_id) subLabel = `Ref #${String(tx.ref_id).slice(0, 8)}`;
     } catch { /* ok */ }
 
     let label = "Transaction";
@@ -70,17 +77,35 @@ export default async function LenderHistoryPage() {
     else if (tx.category === "pool_deposit") label = "Pool Deposit";
     else if (tx.category === "pool_withdraw") label = "Pool Withdrawal";
 
+    let type: "funding" | "repayment" | "deposit" | "withdrawal" = "funding";
+    if (tx.ref_type === "loan_fund") type = "funding";
+    else if (tx.ref_type === "loan_repay") type = "repayment";
+    else if (tx.category === "pool_deposit") type = "deposit";
+    else if (tx.category === "pool_withdraw") type = "withdrawal";
+
     return {
-      "Transaction ID": tx.id,
-      "Type": label,
-      "Reference": subLabel,
-      "Amount": Number(tx.amount).toFixed(2),
-      "Currency": tx.currency || "XLM",
-      "Date": tx.created_at ? new Date(String(tx.created_at)).toLocaleString() : "",
-      "Status": tx.status || "completed",
-      "Stellar Tx Hash": txHash
+      id: tx.id,
+      label,
+      subLabel,
+      amount: Number(tx.amount),
+      currency: tx.currency || "XLM",
+      date: String(tx.created_at),
+      status: tx.status || "completed",
+      txHash,
+      type,
     };
   });
+
+  const exportData = initialTransactions.map((tx) => ({
+    "Transaction ID": tx.id,
+    "Type": tx.label,
+    "Reference": tx.subLabel,
+    "Amount": tx.amount.toFixed(2),
+    "Currency": tx.currency,
+    "Date": tx.date ? new Date(String(tx.date)).toLocaleString() : "",
+    "Status": tx.status,
+    "Stellar Tx Hash": tx.txHash,
+  }));
 
   return (
     <WorkspaceFrame
@@ -88,130 +113,38 @@ export default async function LenderHistoryPage() {
       heading="Transaction History"
       description="A full chronological record of every investment, pool deposit, and repayment — fully verifiable on-chain."
       email={user.email ?? null}
-      userName={String(user.user_metadata?.full_name ?? profile?.full_name ?? "")}
+      userName={String(
+        user.user_metadata?.full_name ?? profile?.full_name ?? ""
+      )}
       metrics={presentLenderMetrics(metrics)}
       currentPath="/dashboard/lender/history"
       links={lenderNavLinks}
     >
       <div className="workspace-stack">
-
         {/* Transaction stream */}
         <article className="workspace-card workspace-card--full">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
-            <h2 className="workspace-card-title" style={{ margin: 0 }}>All Transactions</h2>
-            <ExportCsvButton data={exportData} filename={`lender_transactions_${new Date().toISOString().slice(0,10)}.csv`} />
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: "1.25rem",
+            }}
+          >
+            <h2 className="workspace-card-title" style={{ margin: 0 }}>
+              All Transactions
+            </h2>
+            <ExportCsvButton
+              data={exportData}
+              filename={`lender_transactions_${new Date().toISOString().slice(0, 10)}.csv`}
+            />
           </div>
 
-          {transactions.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "2.5rem", opacity: 0.5 }}>
-              <div style={{ fontSize: "2.5rem", marginBottom: "0.75rem" }}>📋</div>
-              <p>No transactions yet.</p>
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-              {transactions.map((tx) => {
-                let txHash = "";
-                let subLabel = "";
-                try {
-                  const meta = JSON.parse(String(tx.metadata ?? "{}"));
-                  txHash = String(meta.txHash ?? "");
-                  if (meta.loanId) subLabel = `Loan #${String(meta.loanId).slice(0,8)}`;
-                  else if (tx.ref_id) subLabel = `Ref #${String(tx.ref_id).slice(0,8)}`;
-                } catch { /* ok */ }
-                
-                const hasTx = isLikelyTxHash(txHash);
-
-                let label = "Transaction";
-                let icon = "📝";
-                let colorClass = "gray"; // will map to styles
-                let sign = "";
-
-                if (tx.ref_type === "loan_fund") {
-                   label = "P2P Loan Deployed"; icon = "🏦"; colorClass = "purple"; sign = "-";
-                } else if (tx.ref_type === "loan_repay") {
-                   label = "Repayment Received"; icon = "📥"; colorClass = "green"; sign = "+";
-                } else if (tx.category === "pool_deposit") {
-                   label = "Pool Deposit"; icon = "🌊"; colorClass = "blue"; sign = "-";
-                } else if (tx.category === "pool_withdraw") {
-                   label = "Pool Withdrawal"; icon = "💸"; colorClass = "green"; sign = "+";
-                }
-
-                const colors = {
-                   "purple": { bg: "rgba(126,47,208,0.04)", border: "rgba(126,47,208,0.12)", iconBg: "rgba(126,47,208,0.1)", text: "#7e2fd0" },
-                   "green": { bg: "rgba(34,207,157,0.04)", border: "rgba(34,207,157,0.12)", iconBg: "rgba(34,207,157,0.1)", text: "#22cf9d" },
-                   "blue": { bg: "rgba(59,130,246,0.04)", border: "rgba(59,130,246,0.12)", iconBg: "rgba(59,130,246,0.1)", text: "#3b82f6" },
-                   "gray": { bg: "rgba(107,114,128,0.04)", border: "rgba(107,114,128,0.12)", iconBg: "rgba(107,114,128,0.1)", text: "#6b7280" }
-                };
-                const c = colors[colorClass as keyof typeof colors];
-
-                return (
-                  <div key={tx.id} style={{
-                    display: "flex", alignItems: "center", gap: "1rem",
-                    padding: "0.9rem 1rem", borderRadius: "0.65rem",
-                    background: c.bg, border: `1px solid ${c.border}`,
-                    flexWrap: "wrap",
-                  }}>
-                    {/* Icon */}
-                    <div style={{
-                      width: "38px", height: "38px", borderRadius: "50%", flexShrink: 0,
-                      background: c.iconBg, display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: "1.1rem",
-                    }}>
-                      {icon}
-                    </div>
-
-                    {/* Details */}
-                    <div style={{ flex: 1, minWidth: "200px" }}>
-                      <p style={{ margin: 0, fontWeight: 700, fontSize: "0.88rem", color: "#111827" }}>
-                        {label}
-                      </p>
-                      <p style={{ margin: "0.15rem 0 0", fontSize: "0.75rem", color: "#9ca3af", fontFamily: "monospace" }}>
-                        {subLabel}
-                        {subLabel && " · "}
-                        {tx.created_at ? new Date(String(tx.created_at)).toLocaleString() : "—"}
-                      </p>
-                    </div>
-
-                    {/* Amount */}
-                    <div style={{ textAlign: "right", flexShrink: 0 }}>
-                      <p style={{ margin: 0, fontWeight: 800, fontSize: "0.95rem", color: c.text }}>
-                        {sign}{Number(tx.amount).toFixed(2)} XLM
-                      </p>
-                    </div>
-
-                    {/* Verify link */}
-                    {hasTx ? (
-                      <a
-                        href={buildStellarTxVerificationUrl(txHash)}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{
-                          display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                          padding: "0.35rem 0.75rem", borderRadius: "0.4rem",
-                          background: c.bg, border: `1px solid ${c.border}`,
-                          fontSize: "0.75rem", fontWeight: 700, color: c.text,
-                          textDecoration: "none", whiteSpace: "nowrap", flexShrink: 0,
-                        }}
-                      >
-                        ✅ Verify on Stellar ↗
-                      </a>
-                    ) : (
-                      <span style={{
-                        display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                        padding: "0.35rem 0.75rem", borderRadius: "0.4rem",
-                        background: colors.gray.bg, border: `1px solid ${colors.gray.border}`,
-                        fontSize: "0.72rem", color: colors.gray.text, whiteSpace: "nowrap", flexShrink: 0,
-                      }}>
-                        📋 Off-chain record
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          <LenderHistoryClient
+            initialTransactions={initialTransactions}
+            hasMore={hasMore}
+          />
         </article>
-
       </div>
     </WorkspaceFrame>
   );

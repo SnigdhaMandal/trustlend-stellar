@@ -15,6 +15,7 @@ import {
   type AnchorEndpoints,
   type Sep24Transaction,
 } from "@/lib/stellar/sep24";
+import { FocusTrap } from "@/components/ui/FocusTrap";
 
 interface WithdrawToFiatButtonProps {
   /** Borrower wallet address (G...). If null the button prompts to connect. */
@@ -53,11 +54,43 @@ export function WithdrawToFiatButton({ walletAddress }: WithdrawToFiatButtonProp
 
   const config = getSep24Config();
   const busy = step !== "idle" && step !== "done" && step !== "error";
+  const modalRef = useRef<HTMLDivElement>(null);
+  const startButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   // Clean up any in-flight polling when the modal closes / unmounts.
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
+
+  // Close on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && open && !busy) {
+        setOpen(false);
+        reset();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, busy, reset]);
+
+  // Return focus to trigger when modal closes
+  useEffect(() => {
+    if (!open) {
+      const trigger = document.querySelector('[data-withdraw-trigger]') as HTMLElement;
+      trigger?.focus();
+    } else {
+      // Focus the start button or close button when modal opens
+      setTimeout(() => {
+        if (step === "idle" && startButtonRef.current) {
+          startButtonRef.current.focus();
+        } else if (closeButtonRef.current) {
+          closeButtonRef.current.focus();
+        }
+      }, 0);
+    }
+  }, [open, step]);
 
   const reset = useCallback(() => {
     abortRef.current?.abort();
@@ -187,6 +220,8 @@ export function WithdrawToFiatButton({ walletAddress }: WithdrawToFiatButtonProp
         <div
           role="dialog"
           aria-modal="true"
+          aria-labelledby="withdraw-modal-title"
+          aria-describedby="withdraw-modal-description"
           style={{
             position: "fixed",
             inset: 0,
@@ -204,55 +239,57 @@ export function WithdrawToFiatButton({ walletAddress }: WithdrawToFiatButtonProp
             }
           }}
         >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: "#fff",
-              borderRadius: "1rem",
-              padding: "1.75rem",
-              width: "100%",
-              maxWidth: "440px",
-              boxShadow: "0 24px 60px rgba(15,23,42,0.25)",
-            }}
-          >
+          <FocusTrap active={!busy} initialFocusRef={step === "idle" ? startButtonRef : closeButtonRef}>
             <div
+              ref={modalRef}
+              onClick={(e) => e.stopPropagation()}
               style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: "0.75rem",
+                background: "#fff",
+                borderRadius: "1rem",
+                padding: "1.75rem",
+                width: "100%",
+                maxWidth: "440px",
+                boxShadow: "0 24px 60px rgba(15,23,42,0.25)",
               }}
             >
-              <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: 800 }}>
-                Withdraw {config.assetCode} to Fiat
-              </h3>
-              <button
-                type="button"
-                aria-label="Close"
-                onClick={() => {
-                  if (!busy) {
-                    setOpen(false);
-                    reset();
-                  }
-                }}
-                disabled={busy}
+              <div
                 style={{
-                  border: "none",
-                  background: "transparent",
-                  fontSize: "1.25rem",
-                  cursor: busy ? "not-allowed" : "pointer",
-                  color: "#6b7280",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: "0.75rem",
                 }}
               >
-                ×
-              </button>
-            </div>
-
-            <p style={{ fontSize: "0.82rem", color: "#6b7280", marginTop: 0 }}>
-              Powered by Stellar Anchor SEP-24. You&apos;ll sign a one-time login
-              challenge in {getWalletProviderLabel(getConnectedWalletProviderSafe())},
-              then enter your payout details in the anchor&apos;s secure window.
-            </p>
+                <h3 id="withdraw-modal-title" style={{ margin: 0, fontSize: "1.1rem", fontWeight: 800 }}>
+                  Withdraw {config.assetCode} to Fiat
+                </h3>
+                <button
+                  type="button"
+                  aria-label="Close withdrawal dialog"
+                  onClick={() => {
+                    if (!busy) {
+                      setOpen(false);
+                      reset();
+                    }
+                  }}
+                  disabled={busy}
+                  ref={closeButtonRef}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    fontSize: "1.25rem",
+                    cursor: busy ? "not-allowed" : "pointer",
+                    color: "#6b7280",
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+              <p id="withdraw-modal-description" style={{ fontSize: "0.82rem", color: "#6b7280", marginTop: 0 }}>
+                Powered by Stellar Anchor SEP-24. You'll sign a one-time login
+                challenge in {getWalletProviderLabel(getConnectedWalletProviderSafe())},
+                then enter your payout details in the anchor's secure window.
+              </p>
 
             {step === "idle" && (
               <>
@@ -286,6 +323,7 @@ export function WithdrawToFiatButton({ walletAddress }: WithdrawToFiatButtonProp
                 <button
                   type="button"
                   onClick={() => void startWithdraw()}
+                  ref={startButtonRef}
                   style={primaryBtnStyle}
                 >
                   Start Withdrawal
@@ -385,6 +423,7 @@ export function WithdrawToFiatButton({ walletAddress }: WithdrawToFiatButtonProp
               </p>
             )}
           </div>
+        </FocusTrap>
         </div>
       )}
     </>

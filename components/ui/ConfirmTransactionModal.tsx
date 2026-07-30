@@ -6,6 +6,7 @@ import { Loader2, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import { SimulationPreview } from "@/components/ui/SimulationPreview";
 import { simulatePreview } from "@/lib/stellar/simulation";
 import type { SimulationResult } from "@/lib/stellar/simulation";
+import { FocusTrap } from "@/components/ui/FocusTrap";
 
 // ─── Action item descriptor ────────────────────────────────────────────────
 
@@ -67,6 +68,30 @@ export function ConfirmTransactionModal({
     ? Object.entries(action.details)
     : [];
   const mountedRef = useRef(true);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Close on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && open && !confirming) {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, confirming, onClose]);
+
+  // Return focus to trigger when modal closes
+  useEffect(() => {
+    if (!open) {
+      const trigger = document.querySelector('[data-confirm-trigger]') as HTMLElement;
+      trigger?.focus();
+    } else {
+      // Focus the confirm button when modal opens
+      setTimeout(() => confirmButtonRef.current?.focus(), 0);
+    }
+  }, [open]);
 
   // Reset & run simulation when modal opens or action changes
   useEffect(() => {

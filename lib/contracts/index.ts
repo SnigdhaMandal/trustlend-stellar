@@ -32,6 +32,9 @@ export {
 
 export type {
   BorrowerProfile,
+  CollateralEntry,
+  AssetCollateralConfig,
+  LoanRequestInput,
   LoanRecord,
   EscrowHold,
   DefaultRecord,
